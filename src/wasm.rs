@@ -8,6 +8,8 @@ mod transport;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
+    future::Future,
+    pin::Pin,
     rc::Rc,
     sync::Arc,
     time::Duration,
@@ -547,103 +549,117 @@ fn raw(value: &impl Serialize) -> Result<Box<RawValue>, String> {
     serde_json::value::to_raw_value(value).map_err(text)
 }
 
-async fn execute(command: Command) -> Result<Box<RawValue>, String> {
+type Executed = Pin<Box<dyn Future<Output = Result<Box<RawValue>, String>>>>;
+
+fn executed<T: Serialize>(future: impl Future<Output = Result<T, String>> + 'static) -> Executed {
+    Box::pin(async move { raw(&future.await?) })
+}
+
+fn execute(command: Command) -> Executed {
     match command {
-        Command::Configure { value_limit } => {
+        Command::Configure { value_limit } => executed(async move {
             VALUE_LIMIT.set(value_limit);
-            raw(&Value::Null)
-        }
-        Command::Init { config } => raw(&init(config).await?),
+            Ok(Value::Null)
+        }),
+        Command::Init { config } => executed(init(config)),
         Command::Submit {
             scope,
             request_id,
             prompt,
             hand,
             metadata,
-        } => raw(&submit(&scope, request_id, prompt, hand, &metadata).await?),
-        Command::Turn { scope, request_id } => {
+        } => executed(async move { submit(&scope, request_id, prompt, hand, &metadata).await }),
+        Command::Turn { scope, request_id } => executed(async move {
             let record = log(&scope).turn(&request_id).await.map_err(text)?;
-            raw(&json!({"turn": record.as_ref().map(described).transpose()?}))
-        }
-        Command::Pending { scope } => {
+            Ok(json!({"turn": record.as_ref().map(described).transpose()?}))
+        }),
+        Command::Pending { scope } => executed(async move {
             let records = log(&scope).pending().await.map_err(text)?;
-            raw(&json!({"turns": records.iter().map(described).collect::<Result<Vec<_>, _>>()?}))
-        }
+            Ok(json!({"turns": records.iter().map(described).collect::<Result<Vec<_>, _>>()?}))
+        }),
         Command::Cancel {
             scope,
             request_id,
             fields,
-        } => raw(&cancel(&scope, &request_id, &fields).await?),
+        } => executed(async move { cancel(&scope, &request_id, &fields).await }),
         Command::Interrupted {
             scope,
             request_id,
             note,
-        } => {
+        } => executed(async move {
             log(&scope)
                 .interrupted(&request_id, &note)
                 .await
                 .map_err(text)?;
-            raw(&Value::Null)
-        }
+            Ok(Value::Null)
+        }),
         Command::Retry {
             scope,
             request_id,
             error,
             kind,
             retry_at,
-        } => raw(&retry(&scope, &request_id, &error, &kind, retry_at).await?),
+        } => executed(async move { retry(&scope, &request_id, &error, &kind, retry_at).await }),
         Command::Finish {
             scope,
             request_id,
             status,
             fields,
-        } => raw(&finish(&scope, &request_id, &status, &fields).await?),
+        } => executed(async move { finish(&scope, &request_id, &status, &fields).await }),
         Command::Page {
             scope,
             after,
             limit,
             request_id,
-        } => {
+        } => executed(async move {
             let log = log(&scope);
-            let page = match request_id {
+            match request_id {
                 Some(request_id) => log.turn_page(&request_id, after, limit).await,
                 None => log.page(after, limit).await,
-            };
-            raw(&page.map_err(text)?)
-        }
-        Command::Import { scope, turns } => raw(&import(&scope, turns).await?),
-        Command::Drive { next } => raw(&ready()?.drive(next.as_deref()).await?),
-        Command::Attach { hand, connection } => raw(&ready()?.attach(hand, connection).await?),
-        Command::Detach { connection } => raw(&match current() {
-            Some(session) => session.detach(&connection),
-            None => Value::Null,
+            }
+            .map_err(text)
         }),
-        Command::Settle {} => raw(&ready()?.inbox.settle().await.map_err(text)?),
-        Command::Preconnect {} => {
-            ready()?.inbox.agent().preconnect().await.map_err(text)?;
-            raw(&Value::Null)
+        Command::Import { scope, turns } => executed(async move { import(&scope, turns).await }),
+        Command::Drive { next } => executed(async move { ready()?.drive(next.as_deref()).await }),
+        Command::Attach { hand, connection } => {
+            executed(async move { ready()?.attach(hand, connection).await })
         }
-        Command::Dispose {} => raw(&dispose().await?),
+        Command::Detach { connection } => executed(async move {
+            Ok(match current() {
+                Some(session) => session.detach(&connection),
+                None => Value::Null,
+            })
+        }),
+        Command::Settle {} => executed(async move { ready()?.inbox.settle().await.map_err(text) }),
+        Command::Preconnect {} => executed(async move {
+            ready()?.inbox.agent().preconnect().await.map_err(text)?;
+            Ok(Value::Null)
+        }),
+        Command::Dispose {} => executed(dispose()),
         Command::Catalog {
             frame,
             max_frame_bytes,
-        } => raw(&remote::catalog(&frame, max_frame_bytes)?),
+        } => executed(async move { remote::catalog(&frame, max_frame_bytes) }),
         Command::Admit {
             request_id,
             recorded,
             requested,
-        } => raw(&match nanocode::admit_prompt(
-            recorded.map(|provider| provider.model().family()).as_ref(),
-            &requested.model().family(),
-            &request_id,
-        ) {
-            Ok(()) => Value::Null,
-            Err(PromptRejection::ReservedRequestId(_)) => {
-                json!({"rejected": "reserved_request_id"})
-            }
-            Err(PromptRejection::HarnessChanged { .. }) => {
-                json!({"rejected": "provider_changed"})
-            }
+        } => executed(async move {
+            Ok(
+                match nanocode::admit_prompt(
+                    recorded.map(|provider| provider.model().family()).as_ref(),
+                    &requested.model().family(),
+                    &request_id,
+                ) {
+                    Ok(()) => Value::Null,
+                    Err(PromptRejection::ReservedRequestId(_)) => {
+                        json!({"rejected": "reserved_request_id"})
+                    }
+                    Err(PromptRejection::HarnessChanged { .. }) => {
+                        json!({"rejected": "provider_changed"})
+                    }
+                },
+            )
         }),
     }
 }
