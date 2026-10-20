@@ -20,6 +20,7 @@ export type AgentConfiguration = {
   provider?: ModelProvider;
   model?: string;
   thinking?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
+  instructions?: string;
   session_id: string;
   subscription: boolean;
   endpoint: string;

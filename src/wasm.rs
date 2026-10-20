@@ -58,6 +58,8 @@ struct Configuration {
     model: Option<String>,
     #[serde(default)]
     thinking: Option<String>,
+    #[serde(default)]
+    instructions: Option<String>,
     subscription: bool,
     endpoint: String,
     #[serde(default)]
@@ -331,9 +333,20 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
         executors.insert(Arc::clone(&name), Arc::new(remote::host(None).await?));
         executors.set_default(Some(name));
     }
-    if config.remote || config.hands {
+    let placement = config.remote || config.hands;
+    let instructions = [
+        config.instructions.as_deref(),
+        placement.then_some(PLACEMENT_INSTRUCTIONS),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n\n");
+    if !instructions.is_empty() {
+        builder = builder.instructions(instructions);
+    }
+    if placement {
         builder = builder
-            .instructions(PLACEMENT_INSTRUCTIONS)
             .code_mode_host(executors.clone())
             .map_err(configuration)?;
     }
