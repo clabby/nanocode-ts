@@ -1,0 +1,17 @@
+{
+  "name": "nanocode-wasm",
+  "private": true,
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "6.0.2"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm"
+  }
+}

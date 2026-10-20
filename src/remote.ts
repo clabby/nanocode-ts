@@ -1,0 +1,181 @@
+import type { MessageSocket, RemoteRequest } from "./contracts.ts";
+
+export type RemotePolicy = { max_frame_bytes: number; timeout_ms: number };
+
+const encoder = new TextEncoder();
+
+function validate(policy: RemotePolicy) {
+  for (const key of ["max_frame_bytes", "timeout_ms"] as const) {
+    if (!Number.isSafeInteger(policy[key]) || policy[key] <= 0) throw new Error(`remote ${key} must be a positive integer`);
+  }
+}
+
+export class RemoteExecutor<S extends MessageSocket = MessageSocket> {
+  #socket: S;
+  #policy: RemotePolicy;
+  #catalog: string | undefined;
+  #catalogWaiter: { resolve(): void; reject(error: Error): void } | undefined;
+  #frames: string[] = [];
+  #waiter: { id: number; resolve(value: unknown): void } | undefined;
+  #failure: string | undefined;
+  #owner: object | undefined;
+  #closed!: (reason: string) => void;
+  readonly closed = new Promise<string>(resolve => { this.#closed = resolve; });
+
+  private constructor(socket: S, policy: RemotePolicy, listen: boolean) {
+    this.#socket = socket;
+    this.#policy = policy;
+    if (!listen) return;
+    socket.addEventListener("message", event => this.receive(event.data));
+    socket.addEventListener("close", () => this.disconnected());
+    socket.addEventListener("error", () => this.disconnected("runner connection failed"));
+  }
+
+  static accept<S extends MessageSocket>(socket: S, policy: RemotePolicy): RemoteExecutor<S> {
+    validate(policy);
+    return new RemoteExecutor(socket, policy, false);
+  }
+
+  static restore<S extends MessageSocket>(socket: S, policy: RemotePolicy, catalog: string): RemoteExecutor<S> {
+    const executor = RemoteExecutor.accept(socket, policy);
+    executor.#catalog = catalog;
+    return executor;
+  }
+
+  async ready(): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([this.#catalogReady(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("hand catalog deadline elapsed")), this.#policy.timeout_ms); })]);
+    } catch (error) {
+      this.#fail(error instanceof Error ? error.message : String(error), 1011);
+      throw error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  static async connect<S extends MessageSocket>(open: (signal: AbortSignal) => Promise<S>, policy: RemotePolicy): Promise<RemoteExecutor<S>> {
+    validate(policy);
+    const controller = new AbortController();
+    let expire!: (error: Error) => void;
+    const deadline = new Promise<never>((_, reject) => { expire = reject; });
+    const timer = setTimeout(() => {
+      controller.abort();
+      expire(new Error("remote executor connection deadline elapsed"));
+    }, policy.timeout_ms);
+    let executor: RemoteExecutor<S> | undefined;
+    try {
+      const socket = await Promise.race([open(controller.signal), deadline]);
+      executor = new RemoteExecutor(socket, policy, true);
+      await Promise.race([executor.#catalogReady(), deadline]);
+      return executor;
+    } catch (error) {
+      if (executor) executor.#fail(error instanceof Error ? error.message : String(error), 1011);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  get failure(): string | undefined {
+    return this.#failure;
+  }
+
+  get catalog(): string | undefined {
+    return this.#catalog;
+  }
+
+  get socket(): S {
+    return this.#socket;
+  }
+
+  disconnected(reason = "runner disconnected"): void {
+    this.#fail(reason, reason === "runner disconnected" ? 1000 : 1011);
+  }
+
+  reject(reason: string): void {
+    this.#fail(reason, 1002);
+  }
+
+  async execute(request: RemoteRequest, id: number): Promise<unknown> {
+    switch (request.op) {
+      case "remote_catalog":
+        return { frame: this.#catalog, max_frame_bytes: this.#policy.max_frame_bytes, timeout_ms: this.#policy.timeout_ms };
+      case "remote_send":
+        if (this.#failure !== undefined) throw new Error(this.#failure);
+        for (const frame of request.frames ?? []) this.#socket.send(frame);
+        return null;
+      case "remote_poll":
+        if (this.#frames.length) return { frames: this.#frames.splice(0) };
+        if (this.#failure !== undefined) return { closed: this.#failure };
+        if (this.#waiter) throw new Error("remote_poll is already pending");
+        return new Promise(resolve => { this.#waiter = { id, resolve }; });
+      case "remote_close":
+        this.#fail(String(request.reason), 1000);
+        return null;
+      default:
+        throw new Error(`unsupported remote operation ${request.op}`);
+    }
+  }
+
+  claim(owner: object): void {
+    if (this.#owner === owner) return;
+    this.#owner = owner;
+    const waiter = this.#waiter;
+    this.#waiter = undefined;
+    waiter?.resolve({ closed: "connection moved to a newer runtime" });
+  }
+
+  release(): void {
+    this.#owner = {};
+  }
+
+  owns(owner: object): boolean {
+    return this.#owner === owner;
+  }
+
+  cancel(id: number): void {
+    if (this.#waiter?.id !== id) return;
+    this.#waiter.resolve(null);
+    this.#waiter = undefined;
+  }
+
+  async dispose(): Promise<void> {
+    this.#fail("remote executor disposed", 1000);
+  }
+
+  #catalogReady(): Promise<void> {
+    if (this.#catalog !== undefined) return Promise.resolve();
+    if (this.#failure !== undefined) return Promise.reject(new Error(this.#failure));
+    return new Promise((resolve, reject) => { this.#catalogWaiter = { resolve, reject }; });
+  }
+
+  receive(data: unknown): void {
+    if (this.#failure !== undefined) return;
+    if (typeof data !== "string") return this.#fail("remote code mode requires JSON text frames", 1003);
+    if (encoder.encode(data).byteLength > this.#policy.max_frame_bytes) return this.#fail("remote code mode frame exceeds caller max_frame_bytes policy", 1009);
+    if (this.#catalog === undefined) {
+      this.#catalog = data;
+      this.#catalogWaiter?.resolve();
+      this.#catalogWaiter = undefined;
+      return;
+    }
+    this.#frames.push(data);
+    const waiter = this.#waiter;
+    if (!waiter) return;
+    this.#waiter = undefined;
+    waiter.resolve({ frames: this.#frames.splice(0) });
+  }
+
+  #fail(reason: string, code: number) {
+    if (this.#failure !== undefined) return;
+    this.#failure = reason;
+    this.#closed(reason);
+    try { this.#socket.close(code); } catch {}
+    this.#catalogWaiter?.reject(new Error(reason));
+    this.#catalogWaiter = undefined;
+    const waiter = this.#waiter;
+    this.#waiter = undefined;
+    waiter?.resolve({ closed: reason });
+  }
+}
