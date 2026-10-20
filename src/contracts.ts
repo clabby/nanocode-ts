@@ -24,6 +24,7 @@ export type AgentConfiguration = {
   session_id: string;
   subscription: boolean;
   endpoint: string;
+  gateway?: "vercel";
   remote?: boolean;
   executor?: string;
   hands?: boolean;
@@ -118,7 +119,7 @@ export type RuntimeOptions = {
     admit(): Promise<void>;
   };
   tools?: {
-    call(name: string, input: unknown, signal: AbortSignal): Promise<unknown>;
+    call(name: string, input: unknown, signal: AbortSignal, context: { call_id: string }): Promise<unknown>;
   };
   remote?: {
     failed?(): boolean;

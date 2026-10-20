@@ -107,7 +107,7 @@ export class AgentRuntime {
     this.subscription = config.subscription;
     try {
       const initStarted = performance.now();
-      const opened = await this.command("init", { config: { scope: config.scope, session_id: config.session_id, runtime_id: this.runtimeId, started_ms: this.started, provider: config.provider ?? "claude", model: config.model, thinking: config.thinking, instructions: config.instructions, subscription: config.subscription, endpoint: config.endpoint, remote: config.remote ?? false, executor: config.executor, hands: this.hands, event_coalesce_ms: config.event_coalesce_ms ?? 0, tools: config.tools ?? [] } }) as { rejected?: { error: string; kind: string } };
+      const opened = await this.command("init", { config: { scope: config.scope, session_id: config.session_id, runtime_id: this.runtimeId, started_ms: this.started, provider: config.provider ?? "claude", model: config.model, thinking: config.thinking, instructions: config.instructions, subscription: config.subscription, endpoint: config.endpoint, gateway: config.gateway, remote: config.remote ?? false, executor: config.executor, hands: this.hands, event_coalesce_ms: config.event_coalesce_ms ?? 0, tools: config.tools ?? [] } }) as { rejected?: { error: string; kind: string } };
       if (opened.rejected) throw new HostFailure(opened.rejected.error, opened.rejected.kind, true);
       this.timings.record("sdk.open", performance.now() - initStarted);
     } catch (error) {
@@ -407,7 +407,7 @@ export class AgentRuntime {
         this.counters.tool_calls++;
         const controller = new AbortController();
         this.onCancel(id, () => controller.abort());
-        return await this.options.tools.call(request.name, request.input, controller.signal) ?? null;
+        return await this.options.tools.call(request.name, request.input, controller.signal, { call_id: request.call_id }) ?? null;
       }
       case "socket_open": {
         if (!this.options.socket) throw new Error("model sockets are not configured");

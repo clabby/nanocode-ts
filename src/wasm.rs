@@ -19,7 +19,10 @@ use nanocode::{
     ClaudeClient, ClaudeModel, CodeModeExecutors, CodeModeHost, Model, ModelSelection, Nanocode,
     OpenAi, PromptRejection, ServiceTier, Thinking, Tools,
     backend::Prompt,
-    codex::{OpenAiAuth, transport::ResponsesTransport},
+    codex::{
+        OpenAiAuth,
+        transport::{ResponsesGateway, ResponsesTransport},
+    },
     durability::{InitialSettings, SessionRecord, SqlStore},
     session_host::{
         Driven, ImportedTurn, SessionLog, Submission, Submitted, TurnInbox, TurnRecord, TurnState,
@@ -35,6 +38,12 @@ enum Provider {
     #[default]
     Claude,
     Codex,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Gateway {
+    Vercel,
 }
 
 impl Provider {
@@ -62,6 +71,8 @@ struct Configuration {
     instructions: Option<String>,
     subscription: bool,
     endpoint: String,
+    #[serde(default)]
+    gateway: Option<Gateway>,
     #[serde(default)]
     remote: bool,
     #[serde(default)]
@@ -298,12 +309,19 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             let Some(codex) = model.as_codex() else {
                 return Err(configuration(format!("{model} is not a Codex model")));
             };
-            let openai = if config.subscription {
-                OpenAi::builder(OpenAiAuth::host_managed_chatgpt())
+            let openai = match (config.subscription, config.gateway) {
+                (true, Some(Gateway::Vercel)) => {
+                    return Err(configuration(
+                        "the Vercel AI Gateway serves Codex API-key sessions, not ChatGPT subscriptions",
+                    ));
+                }
+                (true, None) => OpenAi::builder(OpenAiAuth::host_managed_chatgpt())
                     .transport(ResponsesTransport::WebSocket)
-                    .websocket_warmup(false)
-            } else {
-                OpenAi::builder(OpenAiAuth::gateway_managed()).transport(ResponsesTransport::Https)
+                    .websocket_warmup(false),
+                (false, Some(Gateway::Vercel)) => OpenAi::builder(OpenAiAuth::gateway_managed())
+                    .responses_gateway(ResponsesGateway::vercel()),
+                (false, None) => OpenAi::builder(OpenAiAuth::gateway_managed())
+                    .transport(ResponsesTransport::Https),
             };
             builder.openai(
                 openai
