@@ -104,7 +104,7 @@ export class AgentRuntime {
     this.subscription = config.subscription;
     try {
       const initStarted = performance.now();
-      const opened = await this.command({ op: "init", config: { scope: config.scope, session_id: config.session_id, runtime_id: this.runtimeId, started_ms: this.started, provider: config.provider ?? "claude", subscription: config.subscription, endpoint: config.endpoint, remote: config.remote ?? false, executor: config.executor, hands: this.hands, event_coalesce_ms: config.event_coalesce_ms ?? 0, tools: config.tools ?? [] } }) as { rejected?: { error: string; kind: string } };
+      const opened = await this.command("init", { config: { scope: config.scope, session_id: config.session_id, runtime_id: this.runtimeId, started_ms: this.started, provider: config.provider ?? "claude", subscription: config.subscription, endpoint: config.endpoint, remote: config.remote ?? false, executor: config.executor, hands: this.hands, event_coalesce_ms: config.event_coalesce_ms ?? 0, tools: config.tools ?? [] } }) as { rejected?: { error: string; kind: string } };
       if (opened.rejected) throw new HostFailure(opened.rejected.error, opened.rejected.kind, true);
       this.timings.record("sdk.open", performance.now() - initStarted);
     } catch (error) {
@@ -131,48 +131,48 @@ export class AgentRuntime {
   }
 
   async submit(scope: string, input: { request_id: string; prompt: string; hand?: string; metadata: unknown }): Promise<{ submitted: "accepted" | "existing" | "conflict"; turn: TurnView }> {
-    return await this.command({ op: "submit", scope, ...input }) as { submitted: "accepted" | "existing" | "conflict"; turn: TurnView };
+    return await this.command("submit", { scope, ...input }) as { submitted: "accepted" | "existing" | "conflict"; turn: TurnView };
   }
 
   async admit(request_id: string, recorded: string | null, requested: string): Promise<"reserved_request_id" | "provider_changed" | undefined> {
-    return (await this.command({ op: "admit", request_id, recorded, requested }) as { rejected?: "reserved_request_id" | "provider_changed" } | null)?.rejected;
+    return (await this.command("admit", { request_id, recorded, requested }) as { rejected?: "reserved_request_id" | "provider_changed" } | null)?.rejected;
   }
 
   async catalog(frame: string, max_frame_bytes: number): Promise<string | null> {
-    return (await this.command({ op: "catalog", frame, max_frame_bytes }) as { name: string | null }).name;
+    return (await this.command("catalog", { frame, max_frame_bytes }) as { name: string | null }).name;
   }
 
   async turn(scope: string, request_id: string): Promise<TurnView | null> {
-    return (await this.command({ op: "turn", scope, request_id }) as { turn: TurnView | null }).turn;
+    return (await this.command("turn", { scope, request_id }) as { turn: TurnView | null }).turn;
   }
 
   async pending(scope: string): Promise<TurnView[]> {
-    return (await this.command({ op: "pending", scope }) as { turns: TurnView[] }).turns;
+    return (await this.command("pending", { scope }) as { turns: TurnView[] }).turns;
   }
 
   async page(scope: string, after: number, limit: number, request_id?: string): Promise<LogPage> {
-    return await this.command({ op: "page", scope, after, limit, request_id }) as LogPage;
+    return await this.command("page", { scope, after, limit, request_id }) as LogPage;
   }
 
   async interrupted(scope: string, request_id: string, note: string): Promise<void> {
-    await this.command({ op: "interrupted", scope, request_id, note });
+    await this.command("interrupted", { scope, request_id, note });
   }
 
   async retry(scope: string, request_id: string, error: string, kind: string, retry_at: number): Promise<TurnView | null> {
-    return (await this.command({ op: "retry", scope, request_id, error, kind, retry_at }) as { turn: TurnView | null }).turn;
+    return (await this.command("retry", { scope, request_id, error, kind, retry_at }) as { turn: TurnView | null }).turn;
   }
 
   async finish(scope: string, request_id: string, status: "failed" | "cancelled", fields: Record<string, unknown>): Promise<void> {
-    await this.command({ op: "finish", scope, request_id, status, fields });
+    await this.command("finish", { scope, request_id, status, fields });
   }
 
   async import(scope: string, turns: unknown[]): Promise<number> {
-    return await this.command({ op: "import", scope, turns }) as number;
+    return await this.command("import", { scope, turns }) as number;
   }
 
   async cancel(scope: string, request_id: string, fields: Record<string, unknown>): Promise<{ turn: TurnView | null; dequeued?: boolean }> {
     this.counters.cancellations++;
-    return await this.command({ op: "cancel", scope, request_id, fields }) as { turn: TurnView | null; dequeued?: boolean };
+    return await this.command("cancel", { scope, request_id, fields }) as { turn: TurnView | null; dequeued?: boolean };
   }
 
   async drive(next?: string): Promise<Driven> {
@@ -180,7 +180,7 @@ export class AgentRuntime {
     this.counters.runs++;
     let result: Driven;
     try {
-      result = await this.command({ op: "drive", next }) as Driven;
+      result = await this.command("drive", { next }) as Driven;
     } catch {
       result = { retry: true };
     }
@@ -200,7 +200,7 @@ export class AgentRuntime {
     if (this.closed || this.attached.has(connection)) return;
     this.attached.add(connection);
     try {
-      await this.command({ op: "attach", hand, connection });
+      await this.command("attach", { hand, connection });
     } catch (error) {
       this.attached.delete(connection);
       throw error;
@@ -209,15 +209,15 @@ export class AgentRuntime {
 
   async detach(connection: string): Promise<void> {
     if (this.closed || !this.attached.delete(connection)) return;
-    await this.command({ op: "detach", connection });
+    await this.command("detach", { connection });
   }
 
   async settle(): Promise<boolean> {
-    return await this.command({ op: "settle" }) === true;
+    return await this.command("settle", {}) === true;
   }
 
   async preconnect(): Promise<void> {
-    await this.command({ op: "preconnect" });
+    await this.command("preconnect", {});
   }
 
   changed(signal?: AbortSignal): Promise<void> {
@@ -242,7 +242,7 @@ export class AgentRuntime {
     this.counters.disposals++;
     let failure: unknown;
     if (!this.stopped && this.opened) {
-      try { await this.command({ op: "dispose" }); } catch (error) { failure = error; }
+      try { await this.command("dispose", {}); } catch (error) { failure = error; }
     }
     this.terminate(new Error("agent runtime disposed"));
     await this.options.remote?.dispose();
@@ -548,12 +548,12 @@ export class AgentRuntime {
     });
   }
 
-  private command(value: unknown): Promise<unknown> {
+  private command(op: string, fields: object): Promise<unknown> {
     if (this.stopped) return Promise.reject(this.failure ?? new Error("agent runtime is closed"));
     const id = ++this.nextCommand;
     return new Promise((resolve, reject) => {
       this.commands.set(id, { resolve, reject });
-      this.enter(() => this.wasm.command(id, ...this.write(value)));
+      this.enter(() => this.wasm.command(id, ...this.write({ [op]: fields })));
     });
   }
 

@@ -87,7 +87,7 @@ struct Legacy {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 enum Command {
     Init {
         config: Configuration,
@@ -154,9 +154,9 @@ enum Command {
     Detach {
         connection: String,
     },
-    Settle,
-    Preconnect,
-    Dispose,
+    Settle {},
+    Preconnect {},
+    Dispose {},
     Catalog {
         frame: String,
         max_frame_bytes: usize,
@@ -596,12 +596,12 @@ async fn execute(command: Command) -> Result<Box<RawValue>, String> {
             Some(session) => session.detach(&connection),
             None => Value::Null,
         }),
-        Command::Settle => raw(&ready()?.inbox.settle().await.map_err(text)?),
-        Command::Preconnect => {
+        Command::Settle {} => raw(&ready()?.inbox.settle().await.map_err(text)?),
+        Command::Preconnect {} => {
             ready()?.inbox.agent().preconnect().await.map_err(text)?;
             raw(&Value::Null)
         }
-        Command::Dispose => raw(&dispose().await?),
+        Command::Dispose {} => raw(&dispose().await?),
         Command::Catalog {
             frame,
             max_frame_bytes,
