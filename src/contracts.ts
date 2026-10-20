@@ -45,6 +45,8 @@ export class RemoteRefusal extends Error {}
 
 export type TurnView = { report: TurnReport; first_seq: number; last_seq: number | null; cancel_requested: boolean; metadata: unknown };
 
+export type Submitted = { submitted: "accepted" | "existing" | "conflict"; turn: TurnView } | { submitted: "too_large"; bytes: number; limit: number };
+
 export type LoggedEvent = { seq: number; request_id: string | null; created_at: number; event: unknown };
 
 export type LogPage = { events: LoggedEvent[]; next_cursor: number; has_more: boolean };
@@ -80,6 +82,7 @@ export type Statement = [string, ...SqlValue[]];
 export type SqlKind = "store" | "log";
 
 export interface SqlHost {
+  readonly value_limit?: number;
   transaction(kind: SqlKind, operation: string, statements: Statement[]): SqlValue[][][] | Promise<SqlValue[][][]>;
 }
 
@@ -100,7 +103,7 @@ export type SocketHandshake = {
 export type RemoteRequest = { op: string; connection?: string | null; frames?: string[]; durable?: boolean; dispatches?: boolean; reason?: string };
 
 export type HostOptions = {
-  published(events: LoggedEvent[]): void;
+  published(events: LoggedEvent[], bytes: number[]): void;
   wake?(): void;
 };
 

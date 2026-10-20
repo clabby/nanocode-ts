@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type Submitted, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 
 type Exports = {
@@ -94,6 +94,7 @@ export class AgentRuntime {
     const instance = await WebAssembly.instantiate(module, { host: runtime.imports() });
     runtime.timings.record("wasm.instantiate", performance.now() - instantiateStarted);
     runtime.wasm = instance.exports as unknown as Exports;
+    if (sql.value_limit !== undefined) await runtime.command("configure", { value_limit: sql.value_limit });
     return runtime;
   }
 
@@ -137,8 +138,8 @@ export class AgentRuntime {
     return false;
   }
 
-  async submit(scope: string, input: { request_id: string; prompt: string; hand?: string; metadata: unknown }): Promise<{ submitted: "accepted" | "existing" | "conflict"; turn: TurnView }> {
-    return await this.command("submit", { scope, ...input }) as { submitted: "accepted" | "existing" | "conflict"; turn: TurnView };
+  async submit(scope: string, input: { request_id: string; prompt: string; hand?: string; metadata: unknown }): Promise<Submitted> {
+    return await this.command("submit", { scope, ...input }) as Submitted;
   }
 
   async admit(request_id: string, recorded: string | null, requested: string): Promise<"reserved_request_id" | "provider_changed" | undefined> {
@@ -492,7 +493,7 @@ export class AgentRuntime {
       case "events": {
         this.counters.event_batches++;
         this.counters.events += request.events.length;
-        this.options.published(request.events);
+        this.options.published(request.events, request.bytes);
         this.notify();
         return null;
       }

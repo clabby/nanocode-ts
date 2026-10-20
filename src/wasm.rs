@@ -5,7 +5,13 @@ mod store;
 mod tools;
 mod transport;
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 
 use nanocode::{
     ClaudeClient, ClaudeModel, CodeModeExecutors, CodeModeHost, Model, ModelSelection, Nanocode,
@@ -89,6 +95,10 @@ struct Legacy {
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Command {
+    Configure {
+        #[serde(default)]
+        value_limit: Option<usize>,
+    },
     Init {
         config: Configuration,
     },
@@ -190,6 +200,7 @@ enum Phase {
 thread_local! {
     static PHASE: RefCell<Phase> = const { RefCell::new(Phase::Empty) };
     static LOGS: RefCell<HashMap<String, Arc<Log>>> = RefCell::new(HashMap::new());
+    static VALUE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 fn text(error: impl std::fmt::Display) -> String {
@@ -214,7 +225,11 @@ fn configuration(error: impl std::fmt::Display) -> Opening {
 fn log(scope: &str) -> Arc<Log> {
     LOGS.with_borrow_mut(|logs| {
         Arc::clone(logs.entry(scope.to_owned()).or_insert_with(|| {
-            Arc::new(SessionLog::new(Arc::new(store::WorkerStore::log()), scope))
+            let log = SessionLog::new(Arc::new(store::WorkerStore::log()), scope);
+            Arc::new(match VALUE_LIMIT.get() {
+                Some(limit) => log.value_limit(limit),
+                None => log,
+            })
         }))
     })
 }
@@ -413,6 +428,9 @@ async fn submit(
         }
         Submitted::Existing(record) => ("existing", record),
         Submitted::Conflict(record) => ("conflict", record),
+        Submitted::TooLarge { bytes, limit } => {
+            return Ok(json!({"submitted": "too_large", "bytes": bytes, "limit": limit}));
+        }
     };
     Ok(json!({"submitted": status, "turn": described(&record)?}))
 }
@@ -531,6 +549,10 @@ fn raw(value: &impl Serialize) -> Result<Box<RawValue>, String> {
 
 async fn execute(command: Command) -> Result<Box<RawValue>, String> {
     match command {
+        Command::Configure { value_limit } => {
+            VALUE_LIMIT.set(value_limit);
+            raw(&Value::Null)
+        }
         Command::Init { config } => raw(&init(config).await?),
         Command::Submit {
             scope,

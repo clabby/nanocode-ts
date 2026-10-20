@@ -31,6 +31,7 @@ impl WorkerInbox {
 struct Published<'a> {
     op: &'static str,
     events: &'a [LoggedEvent],
+    bytes: Vec<usize>,
 }
 
 pub async fn publish(events: Vec<LoggedEvent>) -> Result<(), String> {
@@ -40,6 +41,7 @@ pub async fn publish(events: Vec<LoggedEvent>) -> Result<(), String> {
     call_with(&Published {
         op: "events",
         events: &events,
+        bytes: events.iter().map(|event| event.event.get().len()).collect(),
     })
     .await
     .map(drop)

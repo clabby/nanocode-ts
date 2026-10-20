@@ -7,10 +7,14 @@ export class EventHub {
   private revision = 0;
   private highest = -1;
   private tail: LoggedEvent[] = [];
+  private sizes: number[] = [];
+  private bytes = 0;
   private readonly retained: () => number;
+  private readonly retainedBytes: () => number;
 
-  constructor(retained: () => number) {
+  constructor(retained: () => number, retainedBytes: () => number) {
     this.retained = retained;
+    this.retainedBytes = retainedBytes;
   }
 
   get version(): number { return this.revision; }
@@ -20,11 +24,26 @@ export class EventHub {
     for (const resolve of [...this.listeners]) resolve();
   }
 
-  publish(events: LoggedEvent[]): void {
+  publish(events: LoggedEvent[], bytes: number[]): void {
     if (!events.length) return;
     const first = events[0].seq;
     const last = events[events.length - 1].seq;
-    this.tail = this.highest < 0 || first === this.highest + 1 ? [...this.tail, ...events].slice(-this.retained()) : [];
+    if (this.highest < 0 || first === this.highest + 1) {
+      const tail = [...this.tail, ...events];
+      const sizes = [...this.sizes, ...bytes];
+      let total = this.bytes + bytes.reduce((sum, size) => sum + size, 0);
+      let start = Math.max(0, tail.length - this.retained());
+      for (let index = 0; index < start; index++) total -= sizes[index];
+      const budget = this.retainedBytes();
+      while (start < tail.length && total > budget) total -= sizes[start++];
+      this.tail = tail.slice(start);
+      this.sizes = sizes.slice(start);
+      this.bytes = total;
+    } else {
+      this.tail = [];
+      this.sizes = [];
+      this.bytes = 0;
+    }
     this.highest = Math.max(this.highest, last);
     this.notify();
   }
