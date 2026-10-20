@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 
 type Exports = {
@@ -11,6 +11,8 @@ type Exports = {
 };
 
 type Pending = { resolve(value: unknown): void; reject(reason: unknown): void };
+
+const NULL_CELL = 0xffffffff;
 
 type Socket = { socket: MessageSocket; idle: number; frames: (string | null)[]; closed?: string; waiter?: { id: number; resolve(value: unknown): void }; watchers: (() => void)[]; timing: ModelTiming };
 
@@ -498,12 +500,12 @@ export class AgentRuntime {
       case "store": {
         this.counters.store_calls++;
         const started = performance.now();
-        try { return await this.sql.transaction("store", request.operation, request.statements); }
+        try { return this.rows(await this.sql.transaction("store", request.operation, request.statements)); }
         finally { this.checkpointTimings.record(request.operation, performance.now() - started); }
       }
       case "log": {
         this.counters.log_calls++;
-        return this.sql.transaction("log", request.operation, request.statements);
+        return this.rows(await this.sql.transaction("log", request.operation, request.statements));
       }
       default: throw new Error("unsupported host operation");
     }
@@ -511,6 +513,36 @@ export class AgentRuntime {
 
   private notify() {
     for (const watcher of [...this.watchers]) watcher();
+  }
+
+  private rows(statements: SqlValue[][][]): Uint8Array {
+    let capacity = 4;
+    for (const rows of statements) {
+      capacity += 4;
+      for (const row of rows) {
+        capacity += 4 + 4 * row.length;
+        for (const cell of row) if (typeof cell === "string") capacity += 3 * cell.length;
+      }
+    }
+    const bytes = new Uint8Array(capacity);
+    const view = new DataView(bytes.buffer);
+    let offset = 0;
+    const count = (value: number) => { view.setUint32(offset, value, true); offset += 4; };
+    count(statements.length);
+    for (const rows of statements) {
+      count(rows.length);
+      for (const row of rows) {
+        count(row.length);
+        for (const cell of row) {
+          if (cell === null) { count(NULL_CELL); continue; }
+          if (typeof cell !== "string") throw new Error("SQL host returned a value that is neither text nor null");
+          const { written } = this.encoder.encodeInto(cell, bytes.subarray(offset + 4));
+          count(written);
+          offset += written;
+        }
+      }
+    }
+    return bytes.subarray(0, offset);
   }
 
   private receive(entry: Socket, data: unknown) {

@@ -96,6 +96,13 @@ pub async fn call_with(request: &impl serde::Serialize) -> Result<Value, Value> 
     settle(send(encode(request), None).await)
 }
 
+pub async fn call_bytes_with(request: &impl serde::Serialize) -> Result<Vec<u8>, Value> {
+    match send(encode(request), None).await {
+        Reply::Bytes(bytes) => Ok(bytes),
+        reply => settle(reply).and(Err(Value::from("expected a binary host reply"))),
+    }
+}
+
 pub async fn call_with_body(request: Value, body: &[u8]) -> Result<Value, Value> {
     settle(send(encode(&request), Some(body)).await)
 }
