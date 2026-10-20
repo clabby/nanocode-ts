@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 
 type Exports = {
@@ -139,7 +139,11 @@ export class AgentRuntime {
   }
 
   async catalog(frame: string, max_frame_bytes: number): Promise<string | null> {
-    return (await this.command("catalog", { frame, max_frame_bytes }) as { name: string | null }).name;
+    return (await this.identity(frame, max_frame_bytes)).name;
+  }
+
+  async identity(frame: string, max_frame_bytes: number): Promise<{ name: string | null; runtime_id: string | null }> {
+    return await this.command("catalog", { frame, max_frame_bytes }) as { name: string | null; runtime_id: string | null };
   }
 
   async turn(scope: string, request_id: string): Promise<TurnView | null> {
@@ -618,7 +622,7 @@ export class AgentRuntime {
   }
 
   private static encodeError(error: unknown) {
-    return { detail: error instanceof Error ? error.message : String(error) };
+    return { detail: error instanceof Error ? error.message : String(error), ...(error instanceof RemoteRefusal ? { unsent: true } : {}) };
   }
 
   private elapsed(): number { return performance.now() - this.started; }

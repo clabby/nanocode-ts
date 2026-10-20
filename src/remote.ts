@@ -1,4 +1,4 @@
-import type { MessageSocket, RemoteRequest } from "./contracts.ts";
+import { RemoteRefusal, type MessageSocket, type RemoteRequest } from "./contracts.ts";
 
 export type RemotePolicy = { max_frame_bytes: number; timeout_ms: number };
 
@@ -97,14 +97,24 @@ export class RemoteExecutor<S extends MessageSocket = MessageSocket> {
     this.#fail(reason, 1002);
   }
 
+  refuse(reason: string): void {
+    this.#fail(reason, 1008, reason);
+  }
+
   async execute(request: RemoteRequest, id: number): Promise<unknown> {
     switch (request.op) {
       case "remote_catalog":
         return { frame: this.#catalog, max_frame_bytes: this.#policy.max_frame_bytes, timeout_ms: this.#policy.timeout_ms };
-      case "remote_send":
-        if (this.#failure !== undefined) throw new Error(this.#failure);
-        for (const frame of request.frames ?? []) this.#socket.send(frame);
+      case "remote_send": {
+        if (this.#failure !== undefined) throw new RemoteRefusal(this.#failure);
+        let sent = 0;
+        try {
+          for (const frame of request.frames ?? []) { this.#socket.send(frame); sent++; }
+        } catch (error) {
+          throw sent ? error : new RemoteRefusal(error instanceof Error ? error.message : String(error));
+        }
         return null;
+      }
       case "remote_poll":
         if (this.#frames.length) return { frames: this.#frames.splice(0) };
         if (this.#failure !== undefined) return { closed: this.#failure };
@@ -167,11 +177,11 @@ export class RemoteExecutor<S extends MessageSocket = MessageSocket> {
     waiter.resolve({ frames: this.#frames.splice(0) });
   }
 
-  #fail(reason: string, code: number) {
+  #fail(reason: string, code: number, told?: string) {
     if (this.#failure !== undefined) return;
     this.#failure = reason;
     this.#closed(reason);
-    try { this.#socket.close(code); } catch {}
+    try { this.#socket.close(code, told); } catch {}
     this.#catalogWaiter?.reject(new Error(reason));
     this.#catalogWaiter = undefined;
     const waiter = this.#waiter;

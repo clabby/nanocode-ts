@@ -26,6 +26,14 @@ fn host_error(value: Value) -> CodeModeHostError {
     }
 }
 
+fn send_error(value: Value) -> CodeModeHostError {
+    if value.get("unsent").and_then(Value::as_bool) == Some(true) {
+        CodeModeHostError::unsent(host_error(value).message())
+    } else {
+        host_error(value)
+    }
+}
+
 pub fn busy() -> bool {
     ACTIVITY.with_borrow(|activity| activity.iter().any(RemoteActivity::busy))
 }
@@ -46,11 +54,12 @@ impl RemoteLink for WorkerLink {
             let frames = frames
                 .iter()
                 .map(|frame| frame.encode(self.max_frame_bytes))
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|issue| CodeModeHostError::unsent(issue.message()))?;
             call(json!({"op": "remote_send", "connection": self.connection, "frames": frames, "durable": delivery == RemoteDelivery::Durable, "dispatches": dispatches}))
                 .await
                 .map(drop)
-                .map_err(host_error)
+                .map_err(send_error)
         })
     }
 
@@ -90,11 +99,15 @@ impl RemoteLink for WorkerLink {
             let _ = call(json!({"op": "wake"})).await;
         });
     }
+
+    fn max_frame_bytes(&self) -> Option<usize> {
+        Some(self.max_frame_bytes)
+    }
 }
 
 pub fn catalog(frame: &str, max_frame_bytes: usize) -> Result<Value, String> {
     let catalog = RemoteCatalog::decode(frame, max_frame_bytes).map_err(|e| e.to_string())?;
-    Ok(json!({"name": catalog.name}))
+    Ok(json!({"name": catalog.name, "runtime_id": catalog.runtime_id}))
 }
 
 pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, String> {
@@ -111,13 +124,13 @@ pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, Stri
     let text = catalog["frame"]
         .as_str()
         .ok_or("remote catalog frame must be text")?;
-    let definitions = RemoteCatalog::decode(text, max_frame_bytes)
-        .map_err(|e| e.to_string())?
-        .definitions;
+    let catalog = RemoteCatalog::decode(text, max_frame_bytes).map_err(|e| e.to_string())?;
     let (client, driver) = RemoteClient::new(
         WorkerLink {
             connection,
-            max_frame_bytes,
+            max_frame_bytes: catalog
+                .max_frame_bytes
+                .map_or(max_frame_bytes, |peer| peer.min(max_frame_bytes)),
         },
         Some(Duration::from_millis(timeout_ms)),
     );
@@ -128,5 +141,5 @@ pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, Stri
     spawn(async move {
         driver.await;
     });
-    Ok(client.into_host(definitions))
+    Ok(client.into_host(catalog.definitions))
 }

@@ -41,6 +41,8 @@ export class HostFailure extends Error {
   }
 }
 
+export class RemoteRefusal extends Error {}
+
 export type TurnView = { report: TurnReport; first_seq: number; last_seq: number | null; cancel_requested: boolean; metadata: unknown };
 
 export type LoggedEvent = { seq: number; request_id: string | null; created_at: number; event: unknown };
