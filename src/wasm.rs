@@ -17,10 +17,10 @@ use std::{
 
 use nanocode::{
     ClaudeClient, ClaudeModel, CodeModeExecutors, CodeModeHost, Model, ModelSelection, Nanocode,
-    OpenAi, PromptRejection, Tools,
+    OpenAi, PromptRejection, ServiceTier, Thinking, Tools,
     backend::Prompt,
     codex::{OpenAiAuth, transport::ResponsesTransport},
-    durability::{SessionRecord, SqlStore},
+    durability::{InitialSettings, SessionRecord, SqlStore},
     session_host::{
         Driven, ImportedTurn, SessionLog, Submission, Submitted, TurnInbox, TurnRecord, TurnState,
     },
@@ -54,6 +54,10 @@ struct Configuration {
     started_ms: f64,
     #[serde(default)]
     provider: Provider,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
     subscription: bool,
     endpoint: String,
     #[serde(default)]
@@ -69,8 +73,17 @@ struct Configuration {
 }
 
 impl Configuration {
-    fn model(&self) -> ModelSelection {
-        self.provider.model()
+    fn model(&self) -> Result<ModelSelection, String> {
+        let Some(model) = &self.model else {
+            return Ok(self.provider.model());
+        };
+        model
+            .parse::<ModelSelection>()
+            .map_err(|error| format!("model {model}: {error}"))
+    }
+
+    fn thinking(&self) -> Result<Option<Thinking>, String> {
+        self.thinking.as_deref().map(str::parse).transpose()
     }
 }
 
@@ -261,10 +274,14 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
     let coalesce = Duration::from_millis(config.event_coalesce_ms);
     let store =
         nanocode::session_store(SqlStore::new(store::WorkerStore::durability())).map_err(text)?;
-    let model = config.model();
+    let model = config.model().map_err(configuration)?;
+    let thinking = config.thinking().map_err(configuration)?;
     let mut builder = Nanocode::builder();
     builder = match config.provider {
         Provider::Claude => {
+            if model.as_claude().is_none() {
+                return Err(configuration(format!("{model} is not a Claude model")));
+            }
             let http = nanocode::claude::transport::HttpClient::new(
                 nanocode::claude::transport::SenderTransport(transport::WorkerTransport),
             );
@@ -276,6 +293,9 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             builder.claude(client)
         }
         Provider::Codex => {
+            let Some(codex) = model.as_codex() else {
+                return Err(configuration(format!("{model} is not a Codex model")));
+            };
             let openai = if config.subscription {
                 OpenAi::builder(OpenAiAuth::host_managed_chatgpt())
                     .transport(ResponsesTransport::WebSocket)
@@ -285,7 +305,7 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             };
             builder.openai(
                 openai
-                    .model(Model::Sol)
+                    .model(codex)
                     .raw_api_events(false)
                     .api_base_url(config.endpoint)
                     .host_transport(transport::WorkerTransport)
@@ -325,10 +345,15 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
         config.started_ms,
         executors.clone(),
     ));
+    let mut record = SessionRecord::root(&config.session_id, model, None);
+    record.initial = thinking.map(|thinking| InitialSettings {
+        thinking,
+        service_tier: ServiceTier::Standard,
+    });
     match TurnInbox::open(
         (*runtime).clone(),
         &store,
-        SessionRecord::root(&config.session_id, model, None),
+        record,
         log(&config.scope),
         host,
         coalesce,

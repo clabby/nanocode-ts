@@ -18,6 +18,8 @@ export type HostTool = { name: string; description: string; parameters: Record<s
 export type AgentConfiguration = {
   scope: string;
   provider?: ModelProvider;
+  model?: string;
+  thinking?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
   session_id: string;
   subscription: boolean;
   endpoint: string;
