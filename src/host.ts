@@ -348,7 +348,13 @@ export class AgentRuntime {
         }
         if (!response.body) { this.finishModel(timing, "failed"); throw new Error("provider response has no body"); }
         const body = ++this.nextBody;
-        this.bodies.set(body, { reader: response.body.getReader(), timing });
+        const reader = response.body.getReader();
+        this.bodies.set(body, { reader, timing });
+        this.onCancel(id, () => {
+          if (!this.bodies.delete(body)) return;
+          this.finishModel(timing, "cancelled");
+          void reader.cancel().catch(() => undefined);
+        });
         return { id: body, status: response.status, headers: [...response.headers] };
       }
       case "http_read": {
@@ -425,6 +431,10 @@ export class AgentRuntime {
         socket.addEventListener("message", event => this.receive(entry, event.data));
         socket.addEventListener("close", event => this.closeSocket(handle, `with code ${event.code}: ${event.reason}`, "eof"));
         socket.addEventListener("error", () => this.closeSocket(handle, "after a transport error", "failed"));
+        this.onCancel(id, () => {
+          this.closeSocket(handle, "handshake cancelled", "cancelled");
+          this.sockets.delete(handle);
+        });
         return { id: handle, status: handshake.status, headers: [...handshake.headers] };
       }
       case "socket_send": {
