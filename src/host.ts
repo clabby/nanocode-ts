@@ -130,6 +130,11 @@ export class AgentRuntime {
     return this.wasm.memory.buffer.byteLength;
   }
 
+  get connected(): boolean {
+    for (const entry of this.sockets.values()) if (entry.closed === undefined) return true;
+    return false;
+  }
+
   async submit(scope: string, input: { request_id: string; prompt: string; hand?: string; metadata: unknown }): Promise<{ submitted: "accepted" | "existing" | "conflict"; turn: TurnView }> {
     return await this.command("submit", { scope, ...input }) as { submitted: "accepted" | "existing" | "conflict"; turn: TurnView };
   }
