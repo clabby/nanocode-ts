@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type Submitted, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type Submitted, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 
 type Exports = {
@@ -48,7 +48,7 @@ export type RuntimeMetrics = {
 };
 
 export class AgentRuntime {
-  private readonly runtimeId = crypto.randomUUID();
+  private readonly runtimeId = sessionUuid();
   private readonly startedAt = Date.now();
   private readonly started = performance.now();
   private readonly timings = new Timings();
