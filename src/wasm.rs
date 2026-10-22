@@ -289,6 +289,7 @@ enum Command {
         connection: String,
     },
     Settle {},
+    Compact {},
     Preconnect {},
     Settings {
         #[serde(default)]
@@ -324,7 +325,15 @@ type Log = SessionLog<store::WorkerStore>;
 
 type Hand = (String, Arc<dyn CodeModeHost>);
 
+#[derive(Clone, Copy, PartialEq)]
+enum Activity {
+    Idle,
+    Driving,
+    Compacting,
+}
+
 struct Session {
+    activity: Cell<Activity>,
     executors: CodeModeExecutors,
     hands: RefCell<HashMap<String, Hand>>,
     inbox: TurnInbox<store::WorkerStore>,
@@ -629,6 +638,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         Ok((inbox, pump)) => {
             bridge::spawn(pump);
             Ok(Session {
+                activity: Cell::new(Activity::Idle),
                 executors,
                 hands: RefCell::default(),
                 inbox,
@@ -711,7 +721,13 @@ impl Session {
     }
 
     async fn drive(&self, next: Option<&str>) -> Result<Value, String> {
-        Ok(match self.inbox.drive(next).await.map_err(text)? {
+        if self.activity.get() != Activity::Idle {
+            return Ok(json!({"waiting": true, "busy": true}));
+        }
+        self.activity.set(Activity::Driving);
+        let driven = self.inbox.drive(next).await;
+        self.activity.set(Activity::Idle);
+        Ok(match driven.map_err(text)? {
             Driven::Idle => json!({"idle": true}),
             Driven::Busy => json!({"waiting": true, "busy": true}),
             Driven::Finished(record) => json!({"finished": described(&record)?}),
@@ -719,6 +735,28 @@ impl Session {
             Driven::Waiting(request_id) => json!({"waiting": true, "request_id": request_id}),
             Driven::Interrupted(request_id) => json!({"retry": true, "request_id": request_id}),
         })
+    }
+}
+
+impl Session {
+    async fn compact(&self) -> Result<Value, String> {
+        if self.activity.get() != Activity::Idle {
+            return Ok(json!({"busy": true}));
+        }
+        self.activity.set(Activity::Compacting);
+        let compacted = self.compacting().await;
+        self.activity.set(Activity::Idle);
+        compacted
+    }
+
+    async fn compacting(&self) -> Result<Value, String> {
+        let admitted = !self.inbox.log().pending().await.map_err(text)?.is_empty();
+        if admitted || !self.inbox.settle().await.map_err(text)? {
+            return Ok(json!({"busy": true}));
+        }
+        self.inbox.agent().compact().await.map_err(text)?;
+        self.inbox.settle().await.map_err(text)?;
+        Ok(json!({"compacted": true}))
     }
 }
 
@@ -1013,6 +1051,7 @@ fn execute(command: Command) -> Executed {
             })
         }),
         Command::Settle {} => executed(async move { ready()?.inbox.settle().await.map_err(text) }),
+        Command::Compact {} => executed(async move { ready()?.compact().await }),
         Command::Models {} => executed(async move { Ok(models()) }),
         Command::Preconnect {} => executed(async move {
             ready()?.inbox.agent().preconnect().await.map_err(text)?;

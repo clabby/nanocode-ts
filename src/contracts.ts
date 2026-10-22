@@ -120,6 +120,8 @@ export type HostEvent = { source: string; [field: string]: unknown };
 
 export type Driven = { idle?: boolean; busy?: boolean; waiting?: boolean; retry?: boolean; request_id?: string; resumed?: string; finished?: TurnView };
 
+export type Compacted = { compacted: true } | { busy: true };
+
 export const RECENT_MODEL_LIMIT = 64;
 
 export type ModelTiming = {
