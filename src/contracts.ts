@@ -75,6 +75,8 @@ export type LogPage = { events: LoggedEvent[]; next_cursor: number; has_more: bo
 
 export type Driven = { idle?: boolean; busy?: boolean; waiting?: boolean; retry?: boolean; request_id?: string; resumed?: string; finished?: TurnView };
 
+export type Compacted = { compacted: true } | { busy: true };
+
 export const RECENT_MODEL_LIMIT = 64;
 
 export type ModelTiming = {
