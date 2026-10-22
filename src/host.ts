@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 import { LocalHand } from "./hand.ts";
 
@@ -234,8 +234,16 @@ export class AgentRuntime {
     return await this.command("settle", {}) === true;
   }
 
-  async steer(requestId: string, prompt: string): Promise<boolean> {
-    return await this.command("steer", { request_id: requestId, prompt }) === true;
+  async steer(requestId: string, prompt: string, into?: string): Promise<boolean> {
+    return await this.command("steer", { request_id: requestId, prompt, into }) === true;
+  }
+
+  async replaceQueued(scope: string, request_id: string, edit_id: string, text: string): Promise<Replaced> {
+    return await this.command("replace", { scope, request_id, edit_id, text }) as Replaced;
+  }
+
+  async moveQueued(requestId: string, into?: string): Promise<MovedQueued> {
+    return (await this.command("move_queued", { request_id: requestId, into }) as { moved: MovedQueued }).moved;
   }
 
   async checkThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void> {
