@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostEvent, type HostOptions, type LoggedEvent, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 import { LocalHand } from "./hand.ts";
 
@@ -142,6 +142,10 @@ export class AgentRuntime {
 
   async submit(scope: string, input: { request_id: string; prompt: string; hand?: string; metadata: unknown }): Promise<Submitted> {
     return await this.command("submit", { scope, ...input }) as Submitted;
+  }
+
+  async append(scope: string, events: { request_id?: string; event: HostEvent }[]): Promise<LoggedEvent[]> {
+    return (await this.command("append", { scope, events }) as { appended: LoggedEvent[] }).appended;
   }
 
   async admit(request_id: string, recorded: string | null, requested: string): Promise<"reserved_request_id" | "provider_changed" | undefined> {

@@ -65,13 +65,13 @@ export class Metadata {
 export { SQLITE_VALUE_LIMIT_BYTES };
 
 export class CheckpointStore implements SqlHost {
-  readonly value_limit = SQLITE_VALUE_LIMIT_BYTES;
+  readonly value_limit: number;
   readonly timings = new Timings();
   readonly metrics = metrics();
   readonly log = metrics();
   private readonly sql: DurableObjectSql;
   readonly storage: DurableObjectStorage;
-  constructor(storage: DurableObjectStorage) {
+  constructor(storage: DurableObjectStorage, valueLimit: number = SQLITE_VALUE_LIMIT_BYTES) {
     this.storage = storage;
     this.sql = new DurableObjectSql(storage, observation => {
       const into = observation.kind === "log" ? this.log : this.metrics;
@@ -80,7 +80,8 @@ export class CheckpointStore implements SqlHost {
       into.rows_read += observation.rows_read;
       into.rows_written += observation.rows_written;
       this.timings.record(observation.operation, observation.duration_ms);
-    });
+    }, valueLimit);
+    this.value_limit = this.sql.value_limit;
   }
 
   row(query: string, ...values: SqlStorageValue[]): Row | undefined {
