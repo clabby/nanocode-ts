@@ -10,7 +10,7 @@
     "LICENSE-MIT"
   ],
   "scripts": {
-    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
+    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json && node scripts/zyzz.mjs",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.vercel.json"
   },
   "exports": {
@@ -30,6 +30,23 @@
       "types": "./dist/client.d.ts",
       "default": "./dist/client.js"
     },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "default": "./dist/react/index.js"
+    },
+    "./react/site": {
+      "types": "./dist/react/site.d.ts",
+      "default": "./dist/react/site.js"
+    },
+    "./react/theme": {
+      "types": "./dist/react/theme.d.ts",
+      "default": "./dist/react/theme.js"
+    },
+    "./react/zyzz.css": "./dist/react/zyzz.css",
+    "./highlight": {
+      "types": "./dist/highlight.d.ts",
+      "default": "./dist/highlight.js"
+    },
     "./models": {
       "types": "./dist/models.d.ts",
       "default": "./dist/models.js"
@@ -47,22 +64,33 @@
   },
   "dependencies": {
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
-    "quickjs-emscripten-core": "0.32.0"
+    "quickjs-emscripten-core": "0.32.0",
+    "zyzz": "0.0.40"
   },
   "peerDependencies": {
+    "@pierre/highlights": "^0.2.0",
     "@vercel/oidc": "^3.2.0",
-    "durable-harness": "0.0.1-beta.6"
+    "durable-harness": "0.0.1-beta.6",
+    "react": "^19.0.0"
   },
   "peerDependenciesMeta": {
+    "@pierre/highlights": {
+      "optional": true
+    },
     "@vercel/oidc": {
       "optional": true
     },
     "durable-harness": {
       "optional": true
+    },
+    "react": {
+      "optional": true
     }
   },
   "devDependencies": {
+    "@pierre/highlights": "0.2.0",
     "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
     "@vercel/oidc": "3.2.0",
     "durable-harness": "0.0.1-beta.6",
     "typescript": "6.0.2"
