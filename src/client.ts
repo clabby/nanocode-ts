@@ -56,6 +56,7 @@ export function liveEvent(logged: LoggedEvent): LiveEvent | undefined {
       default: return undefined;
     }
   }
+  if (body.source !== undefined) return undefined;
   if (body.type === "result") return { type: "turn", status: body.status, ...(body.ok?.message !== undefined ? { message: body.ok.message } : {}), ...(body.error !== undefined ? { error: body.error } : {}), ...base };
   if (body.type === "retrying") return { type: "retrying", ...body, ...base };
   return undefined;

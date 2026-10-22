@@ -44,7 +44,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
 
   const receive = (logged: LoggedEvent, requestId: string, sink: Sink): boolean => {
     const body = (logged.event ?? {}) as { source?: string; type?: string };
-    if (body.source === "agent") {
+    if (body.source !== undefined) {
       const event = liveEvent(logged);
       if (event) sink.push(event);
       return false;
