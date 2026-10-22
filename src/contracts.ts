@@ -35,6 +35,7 @@ export type AgentConfiguration = {
   code_mode?: boolean;
   event_coalesce_ms?: number;
   stream_tool_input?: boolean;
+  environment?: { cwd?: string; shell?: string; timezone?: string };
   tools?: HostTool[];
   workspace?: string;
   mcp_servers?: McpServer[];
@@ -46,7 +47,7 @@ export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
 
 export type ModelGateway = "direct" | "vercel" | "workers_ai";
 
-export type ModelEntry = { id: string; name: string; efforts: Thinking[]; effort: Thinking; priority: boolean; gateways: ModelGateway[] };
+export type ModelEntry = { id: string; name: string; efforts: Thinking[]; effort: Thinking; priority: boolean; gateways: ModelGateway[]; context_window_tokens: number; auto_compact_token_limit: number | null };
 
 export type ModelCatalog = { harnesses: { id: ModelProvider; models: ModelEntry[] }[] };
 

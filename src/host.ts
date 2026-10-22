@@ -310,6 +310,14 @@ export class AgentRuntime {
         cancel();
       },
       clock: (monotonic: number) => monotonic ? performance.now() : Date.now(),
+      calendar_date: (pointer: number, length: number) => {
+        try {
+          const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: this.read(pointer, length), year: "numeric", month: "numeric", day: "numeric" }).formatToParts(Date.now()).map(part => [part.type, Number(part.value)]));
+          return parts.year * 10_000 + parts.month * 100 + parts.day;
+        } catch {
+          return 0;
+        }
+      },
       random: (pointer: number, length: number) => { crypto.getRandomValues(new Uint8Array(this.wasm.memory.buffer, pointer, length)); },
       reply: (id: number, pointer: number, length: number) => {
         const reply = JSON.parse(this.read(pointer, length));

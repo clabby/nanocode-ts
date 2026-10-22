@@ -18,12 +18,14 @@ use std::{
 };
 
 use nanocode::{
-    ClaudeClient, ClaudeHarness, ClaudeModel, CodeModeExecutors, CodeModeHost, HarnessFamily,
-    Model, ModelSelection, ModelTransport, Nanocode, NanocodeError, OpenAi, PromptRejection,
-    ServiceTier, Thinking, Tools,
+    ClaudeClient, ClaudeHarness, ClaudeModel, CodeModeExecutors, CodeModeHost, CodexHarness,
+    HarnessFamily, Model, ModelSelection, ModelTransport, Nanocode, NanocodeError, OpenAi,
+    PromptRejection, ServiceTier, Thinking, Tools,
+    agent::ExecutionEnvironment,
     backend::Prompt,
+    claude::ClaudeEnvironment,
     codex::{
-        OpenAiAuth,
+        CONTEXT_WINDOW_TOKENS, OpenAiAuth, auto_compact_token_limit,
         transport::{ChatGateway, ResponsesGateway, ResponsesTransport},
     },
     durability::{InitialSettings, SessionRecord, SqlStore},
@@ -102,11 +104,70 @@ struct Configuration {
     #[serde(default)]
     stream_tool_input: bool,
     #[serde(default)]
+    environment: Option<Environment>,
+    #[serde(default)]
     tools: Vec<tools::HostTool>,
     #[serde(default)]
     workspace: Option<String>,
     #[serde(default)]
     mcp_servers: Vec<mcp::Server>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Environment {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    shell: Option<String>,
+    #[serde(default)]
+    timezone: Option<String>,
+}
+
+impl Environment {
+    fn resolve(mut self, workspace: Option<&str>) -> Result<Self, String> {
+        if let Some(timezone) = self.timezone.as_deref()
+            && bridge::local_date(timezone).is_none()
+        {
+            return Err(format!("unknown timezone {timezone}"));
+        }
+        match (self.cwd.as_deref(), workspace) {
+            (Some(cwd), Some(workspace)) if cwd != workspace => Err(format!(
+                "environment.cwd {cwd} differs from workspace {workspace}, where the workspace tools run"
+            )),
+            (None, Some(workspace)) => {
+                self.cwd = Some(workspace.to_owned());
+                Ok(self)
+            }
+            _ => Ok(self),
+        }
+    }
+
+    fn codex(&self) -> ExecutionEnvironment {
+        let timezone: Arc<str> = self.timezone.as_deref().unwrap_or("Etc/UTC").into();
+        let zone = Arc::clone(&timezone);
+        let mut environment = ExecutionEnvironment::dated(timezone, move || {
+            bridge::local_date(&zone).unwrap_or_default()
+        });
+        if let Some(cwd) = &self.cwd {
+            environment = environment.working_directory(cwd.as_str());
+        }
+        if let Some(shell) = &self.shell {
+            environment = environment.shell(shell.as_str());
+        }
+        environment
+    }
+
+    fn claude(&self) -> ClaudeEnvironment {
+        let mut environment = ClaudeEnvironment::new();
+        if let Some(cwd) = &self.cwd {
+            environment = environment.working_directory(cwd.as_str());
+        }
+        if let Some(shell) = &self.shell {
+            environment = environment.shell(shell.as_str());
+        }
+        environment
+    }
 }
 
 impl Configuration {
@@ -334,6 +395,11 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
         nanocode::session_store(SqlStore::new(store::WorkerStore::durability())).map_err(text)?;
     let model = config.model().map_err(configuration)?;
     let thinking = config.thinking().map_err(configuration)?;
+    let environment = config
+        .environment
+        .map(|environment| environment.resolve(config.workspace.as_deref()))
+        .transpose()
+        .map_err(configuration)?;
     let mut builder = Nanocode::builder();
     builder = match config.provider {
         Provider::Claude => {
@@ -347,8 +413,12 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             }
             let max_tokens = config.max_tokens;
             let stream_tool_input = config.stream_tool_input;
+            let environment = environment.as_ref().map(Environment::claude);
             builder.claude(ClaudeHarness::new(client).configure(move |claude| {
-                let claude = claude.tool_input_deltas(stream_tool_input);
+                let mut claude = claude.tool_input_deltas(stream_tool_input);
+                if let Some(environment) = &environment {
+                    claude = claude.environment(environment.clone());
+                }
                 Ok(match max_tokens {
                     Some(max_tokens) => claude.max_tokens(max_tokens),
                     None => claude,
@@ -395,14 +465,19 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
                 Some(Gateway::WorkersAi) => openai,
                 _ => openai.api_base_url(config.endpoint),
             };
-            builder.openai(
-                openai
-                    .model(codex)
-                    .tool_input_deltas(config.stream_tool_input)
-                    .host_transport(transport::WorkerTransport)
-                    .build()
-                    .map_err(configuration)?,
-            )
+            let client = openai
+                .model(codex)
+                .tool_input_deltas(config.stream_tool_input)
+                .host_transport(transport::WorkerTransport)
+                .build()
+                .map_err(configuration)?;
+            let environment = environment.as_ref().map(Environment::codex);
+            builder.openai(CodexHarness::new(client).configure(move |codex| {
+                Ok(match &environment {
+                    Some(environment) => codex.execution_environment(environment.clone()),
+                    None => codex,
+                })
+            }))
         }
     };
     if config.code_mode && config.remote {
@@ -735,7 +810,11 @@ fn raw(value: &impl Serialize) -> Result<Box<RawValue>, String> {
 type Executed = Pin<Box<dyn Future<Output = Result<Box<RawValue>, String>>>>;
 
 fn models() -> Value {
-    let entry = |id: &str, model: ModelSelection, gateways: Vec<&str>| {
+    let entry = |id: &str,
+                 model: ModelSelection,
+                 gateways: Vec<&str>,
+                 context_window_tokens: u64,
+                 auto_compact_limit: Option<u64>| {
         let capabilities = model.capabilities(ModelTransport::Native);
         json!({
             "id": id,
@@ -744,11 +823,22 @@ fn models() -> Value {
             "effort": capabilities.default_thinking().as_str(),
             "priority": capabilities.supports_service_tier(ServiceTier::Priority),
             "gateways": gateways,
+            "context_window_tokens": context_window_tokens,
+            "auto_compact_token_limit": auto_compact_limit,
         })
     };
     let claude = HarnessFamily::Claude
         .models()
-        .map(|model| entry(model.as_str(), model.clone(), vec!["direct", "vercel"]))
+        .map(|model| {
+            let window = nanocode::claude::default_context_window_tokens(model.as_str());
+            entry(
+                model.as_str(),
+                model.clone(),
+                vec!["direct", "vercel"],
+                window,
+                None,
+            )
+        })
         .collect::<Vec<_>>();
     let vercel = ResponsesGateway::vercel();
     let workers_ai = ChatGateway::workers_ai("catalog");
@@ -768,7 +858,14 @@ fn models() -> Value {
                 Model::Glm53 => "glm-5.3",
                 _ => model.as_str(),
             };
-            entry(id, ModelSelection::Codex(model), gateways)
+            let window = CONTEXT_WINDOW_TOKENS.min(model.max_context_window_tokens());
+            entry(
+                id,
+                ModelSelection::Codex(model),
+                gateways,
+                window,
+                auto_compact_token_limit(model.as_str(), window),
+            )
         })
         .collect::<Vec<_>>();
     json!({"harnesses": [
