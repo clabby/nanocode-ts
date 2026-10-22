@@ -135,7 +135,10 @@ export interface WorkspaceHost {
   run(request: ShellRun, signal: AbortSignal): Promise<ShellOutput>;
 }
 
+export type LogPageOptions = { request_id?: string; max_bytes?: number };
+
 export type HostOptions = {
+  log_logical_limit?: number;
   published(events: LoggedEvent[], bytes: number[]): void;
   wake?(): void;
 };

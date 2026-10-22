@@ -1089,7 +1089,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       if (this.deleted) return Promise.reject(new Error("session deleted"));
       let current = this.instances.get(scope);
       if (!current) {
-        current = AgentRuntime.instantiate(wasm, this.store, { published: (events, bytes) => this.published(scope, events, bytes), wake: () => this.eventHub.notify() });
+        current = AgentRuntime.instantiate(wasm, this.store, { log_logical_limit: SQLITE_VALUE_LIMIT_BYTES, published: (events, bytes) => this.published(scope, events, bytes), wake: () => this.eventHub.notify() });
         const created = current;
         this.instances.set(scope, created);
         void created.catch(() => { if (this.instances.get(scope) === created) this.instances.delete(scope); });

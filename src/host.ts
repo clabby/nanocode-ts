@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 import { LocalHand } from "./hand.ts";
 
@@ -95,7 +95,9 @@ export class AgentRuntime {
     const instance = await WebAssembly.instantiate(module, { host: runtime.imports() });
     runtime.timings.record("wasm.instantiate", performance.now() - instantiateStarted);
     runtime.wasm = instance.exports as unknown as Exports;
-    if (sql.value_limit !== undefined) await runtime.command("configure", { value_limit: sql.value_limit });
+    if (sql.value_limit !== undefined || options.log_logical_limit !== undefined) {
+      await runtime.command("configure", { value_limit: sql.value_limit, logical_limit: options.log_logical_limit });
+    }
     return runtime;
   }
 
@@ -164,8 +166,9 @@ export class AgentRuntime {
     return (await this.command("pending", { scope }) as { turns: TurnView[] }).turns;
   }
 
-  async page(scope: string, after: number, limit: number, request_id?: string): Promise<LogPage> {
-    return await this.command("page", { scope, after, limit, request_id }) as LogPage;
+  async page(scope: string, after: number, limit: number, options?: string | LogPageOptions): Promise<LogPage> {
+    const page = typeof options === "string" ? { request_id: options } : options;
+    return await this.command("page", { scope, after, limit, ...page }) as LogPage;
   }
 
   async interrupted(scope: string, request_id: string, note: string): Promise<void> {

@@ -161,6 +161,8 @@ enum Command {
     Configure {
         #[serde(default)]
         value_limit: Option<usize>,
+        #[serde(default)]
+        logical_limit: Option<usize>,
     },
     Init {
         config: Value,
@@ -211,6 +213,8 @@ enum Command {
         limit: usize,
         #[serde(default)]
         request_id: Option<String>,
+        #[serde(default)]
+        max_bytes: Option<usize>,
     },
     Import {
         scope: String,
@@ -273,6 +277,7 @@ enum Phase {
 thread_local! {
     static PHASE: RefCell<Phase> = const { RefCell::new(Phase::Empty) };
     static LOGS: RefCell<HashMap<String, Arc<Log>>> = RefCell::new(HashMap::new());
+    static LOGICAL_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
     static VALUE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
@@ -299,8 +304,12 @@ fn log(scope: &str) -> Arc<Log> {
     LOGS.with_borrow_mut(|logs| {
         Arc::clone(logs.entry(scope.to_owned()).or_insert_with(|| {
             let log = SessionLog::new(Arc::new(store::WorkerStore::log()), scope);
-            Arc::new(match VALUE_LIMIT.get() {
+            let log = match VALUE_LIMIT.get() {
                 Some(limit) => log.value_limit(limit),
+                None => log,
+            };
+            Arc::new(match LOGICAL_LIMIT.get() {
+                Some(limit) => log.logical_limit(limit),
                 None => log,
             })
         }))
@@ -783,8 +792,12 @@ fn executed<T: Serialize>(future: impl Future<Output = Result<T, String>> + 'sta
 
 fn execute(command: Command) -> Executed {
     match command {
-        Command::Configure { value_limit } => executed(async move {
+        Command::Configure {
+            value_limit,
+            logical_limit,
+        } => executed(async move {
             VALUE_LIMIT.set(value_limit);
+            LOGICAL_LIMIT.set(logical_limit);
             Ok(Value::Null)
         }),
         Command::Init { config } => executed(init(config)),
@@ -837,11 +850,17 @@ fn execute(command: Command) -> Executed {
             after,
             limit,
             request_id,
+            max_bytes,
         } => executed(async move {
             let log = log(&scope);
-            match request_id {
-                Some(request_id) => log.turn_page(&request_id, after, limit).await,
-                None => log.page(after, limit).await,
+            match (request_id, max_bytes) {
+                (Some(request_id), Some(bytes)) => {
+                    log.turn_page_bounded(&request_id, after, limit, bytes)
+                        .await
+                }
+                (Some(request_id), None) => log.turn_page(&request_id, after, limit).await,
+                (None, Some(bytes)) => log.page_bounded(after, limit, bytes).await,
+                (None, None) => log.page(after, limit).await,
             }
             .map_err(text)
         }),
