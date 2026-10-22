@@ -4,7 +4,7 @@ use nanocode_code_mode::{
     embedded::{CodeModeHostError, HostFuture},
     remote::{
         RemoteActivity, RemoteCatalog, RemoteClient, RemoteCodeModeHost, RemoteDelivery,
-        RemoteFrame as Frame, RemoteLink,
+        RemoteFrame as Frame, RemoteLink, RemoteOperation,
     },
 };
 use serde_json::{Value, json};
@@ -38,6 +38,19 @@ pub fn busy() -> bool {
     ACTIVITY.with_borrow(|activity| activity.iter().any(RemoteActivity::busy))
 }
 
+fn origin(frame: &Frame) -> Option<&str> {
+    match frame {
+        Frame::Request {
+            operation:
+                RemoteOperation::Execute { context, .. }
+                | RemoteOperation::Wait { context, .. }
+                | RemoteOperation::Call { context, .. },
+            ..
+        } => context.host_context.as_deref(),
+        _ => None,
+    }
+}
+
 struct WorkerLink {
     connection: Option<String>,
     max_frame_bytes: usize,
@@ -51,15 +64,45 @@ impl RemoteLink for WorkerLink {
     ) -> HostFuture<'_, Result<(), CodeModeHostError>> {
         Box::pin(async move {
             let dispatches = frames.iter().any(Frame::dispatches);
-            let frames = frames
+            let origins: Vec<Value> = frames
+                .iter()
+                .enumerate()
+                .filter(|(_, frame)| frame.dispatches())
+                .map(|(index, frame)| json!({"index": index, "origin": origin(frame)}))
+                .collect();
+            let encoded = frames
                 .iter()
                 .map(|frame| frame.encode(self.max_frame_bytes))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|issue| CodeModeHostError::unsent(issue.message()))?;
-            call(json!({"op": "remote_send", "connection": self.connection, "frames": frames, "durable": delivery == RemoteDelivery::Durable, "dispatches": dispatches}))
+            let sent = call(json!({"op": "remote_send", "connection": self.connection, "frames": encoded, "durable": delivery == RemoteDelivery::Durable, "dispatches": dispatches, "origins": origins}))
                 .await
-                .map(drop)
-                .map_err(send_error)
+                .map_err(send_error)?;
+            let Some(refused) = sent
+                .get("refused")
+                .and_then(Value::as_array)
+                .filter(|refused| !refused.is_empty())
+            else {
+                return Ok(());
+            };
+            let ids = refused
+                .iter()
+                .map(|index| {
+                    match index
+                        .as_u64()
+                        .and_then(|index| frames.get(usize::try_from(index).ok()?))
+                    {
+                        Some(Frame::Request { id, .. }) => Ok(*id),
+                        _ => Err(error(format!(
+                            "the host refused {index}, which is not a request frame of the batch"
+                        ))),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let reason = sent["reason"]
+                .as_str()
+                .ok_or_else(|| error("the host refused requests without a reason"))?;
+            Err(CodeModeHostError::refused(reason, ids))
         })
     }
 

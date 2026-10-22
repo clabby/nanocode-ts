@@ -122,7 +122,7 @@ export type SocketHandshake = {
   text(): Promise<string>;
 };
 
-export type RemoteRequest = { op: string; connection?: string | null; frames?: string[]; durable?: boolean; dispatches?: boolean; reason?: string };
+export type RemoteRequest = { op: string; connection?: string | null; frames?: string[]; durable?: boolean; dispatches?: boolean; origins?: { index: number; origin: string | null }[]; refused?: number[]; reason?: string };
 
 export type ShellRun = { command: string; cwd: string; timeout_ms: number | null };
 
@@ -141,14 +141,14 @@ export type HostOptions = {
 };
 
 export type RuntimeOptions = {
-  dispatch(request: { endpoint: string; method: string; headers: [string, string][]; body: Uint8Array }, signal: AbortSignal, timing: RuntimeTiming): Promise<Response>;
+  dispatch(request: { endpoint: string; method: string; headers: [string, string][]; body: Uint8Array; origin: string | null }, signal: AbortSignal, timing: RuntimeTiming): Promise<Response>;
   finishing?(request_id: string): Record<string, unknown> | Promise<Record<string, unknown>>;
   socket?: {
-    open(request: { headers: [string, string][] }, signal: AbortSignal, timing: RuntimeTiming): Promise<SocketHandshake>;
-    admit(): Promise<void>;
+    open(request: { headers: [string, string][]; origin: string | null }, signal: AbortSignal, timing: RuntimeTiming): Promise<SocketHandshake>;
+    admit(origin: string | null): Promise<void>;
   };
   tools?: {
-    call(name: string, input: unknown, signal: AbortSignal, context: { call_id: string }): Promise<unknown>;
+    call(name: string, input: unknown, signal: AbortSignal, context: { call_id: string; origin: string | null }): Promise<unknown>;
   };
   workspace?: WorkspaceHost;
   remote?: {

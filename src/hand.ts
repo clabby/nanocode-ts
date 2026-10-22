@@ -358,10 +358,12 @@ export class LocalHand {
     switch (request.op) {
       case "remote_catalog":
         return { frame: encode({ type: "catalog", definitions: [], name: this.name, max_frame_bytes: this.#maxFrameBytes }), max_frame_bytes: this.#maxFrameBytes, timeout_ms: this.#timeoutMs };
-      case "remote_send":
+      case "remote_send": {
         if (this.#closed !== undefined) throw new Error(this.#closed);
-        for (const frame of request.frames ?? []) this.#receive(decode(frame));
-        return null;
+        const refused = new Set(request.refused);
+        for (const [index, frame] of (request.frames ?? []).entries()) if (!refused.has(index)) this.#receive(decode(frame));
+        return refused.size ? { refused: [...refused], reason: request.reason } : null;
+      }
       case "remote_poll":
         if (this.#frames.length) return { frames: this.#frames.splice(0) };
         if (this.#closed !== undefined) return { closed: this.#closed };

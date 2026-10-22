@@ -12,7 +12,7 @@ use nanocode::{
         ConnectedHost, HostConnectRequest, HostConnection, HostConnectionMetadata, HostError,
         HostFuture, HostHttpResponse, HostMessage, HostTransport, send_http,
     },
-    http::{BoxFuture, Error, Request, Response, Sender},
+    http::{BoxFuture, Error, Request, Response, Sender, origin},
 };
 use serde_json::{Value, json};
 
@@ -73,7 +73,7 @@ impl Sender for WorkerTransport {
         Box::pin(async move {
             let headers = header_pairs(&request.headers).map_err(layer_error)?;
             let started = call_with_body(
-                json!({"op": "http_start", "endpoint": request.url, "method": request.method.as_str(), "headers": headers}),
+                json!({"op": "http_start", "endpoint": request.url, "method": request.method.as_str(), "headers": headers, "origin": origin::current().as_deref()}),
                 &request.body,
             )
             .await
@@ -104,7 +104,7 @@ impl HostConnection for Socket {
     fn send<'a>(&'a self, message: &'a str) -> HostFuture<'a, Result<(), HostError>> {
         Box::pin(async move {
             match call_with_body(
-                json!({"op": "socket_send", "id": self.id}),
+                json!({"op": "socket_send", "id": self.id, "origin": origin::current().as_deref()}),
                 message.as_bytes(),
             )
             .await
@@ -166,7 +166,7 @@ impl HostTransport for WorkerTransport {
     ) -> HostFuture<'a, Result<ConnectedHost, HostError>> {
         Box::pin(async move {
             let headers = request.socket_headers()?;
-            let opened = call(json!({"op": "socket_open", "headers": header_pairs(&headers).map_err(host_error)?}))
+            let opened = call(json!({"op": "socket_open", "headers": header_pairs(&headers).map_err(host_error)?, "origin": origin::current().as_deref()}))
                 .await
                 .map_err(host_error)?;
             let status = status(&opened).map_err(host_error)?;

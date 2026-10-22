@@ -26,7 +26,7 @@ impl FunctionHandler for Bridge {
         context: ToolContext<'a>,
     ) -> HostFuture<'a, Result<Value, String>> {
         Box::pin(async move {
-            call(json!({"op": "tool_call", "name": name, "input": input, "call_id": context.call_id()}))
+            call(json!({"op": "tool_call", "name": name, "input": input, "call_id": context.call_id(), "origin": context.host_context()}))
                 .await
                 .map_err(|error| {
                     error

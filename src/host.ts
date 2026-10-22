@@ -238,6 +238,10 @@ export class AgentRuntime {
     return await this.command("steer", { request_id: requestId, prompt }) === true;
   }
 
+  async completionOrigin(requestId: string): Promise<string | null> {
+    return await this.command("completion_origin", { request_id: requestId }) as string | null;
+  }
+
   async checkThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void> {
     await this.command("thinking", { thinking, apply: false });
   }
@@ -358,7 +362,7 @@ export class AgentRuntime {
         this.models.push(timing);
         if (this.models.length > RECENT_MODEL_LIMIT) this.models.shift();
         let response: Response;
-        try { response = await this.options.dispatch({ endpoint: request.endpoint, method: request.method ?? "POST", headers: request.headers, body: request.body }, controller.signal, timing); }
+        try { response = await this.options.dispatch({ endpoint: request.endpoint, method: request.method ?? "POST", headers: request.headers, body: request.body, origin: request.origin ?? null }, controller.signal, timing); }
         catch (error) { this.finishModel(timing, controller.signal.aborted ? "cancelled" : "failed"); throw error; }
         timing.headers_ms = this.elapsed() - timing.started_ms;
         timing.status = response.status;
@@ -424,7 +428,7 @@ export class AgentRuntime {
         this.counters.tool_calls++;
         const controller = new AbortController();
         this.onCancel(id, () => controller.abort());
-        return await this.options.tools.call(request.name, request.input, controller.signal, { call_id: request.call_id }) ?? null;
+        return await this.options.tools.call(request.name, request.input, controller.signal, { call_id: request.call_id, origin: request.origin ?? null }) ?? null;
       }
       case "file_read": return await this.workspace().read(request.path);
       case "file_write": return await this.workspace().write(request.path, request.contents) ?? null;
@@ -443,7 +447,7 @@ export class AgentRuntime {
         this.models.push(timing);
         if (this.models.length > RECENT_MODEL_LIMIT) this.models.shift();
         let handshake;
-        try { handshake = await this.options.socket.open({ headers: request.headers }, controller.signal, timing); }
+        try { handshake = await this.options.socket.open({ headers: request.headers, origin: request.origin ?? null }, controller.signal, timing); }
         catch (error) { this.finishModel(timing, controller.signal.aborted ? "cancelled" : "failed"); throw error; }
         timing.headers_ms = this.elapsed() - timing.started_ms;
         timing.status = handshake.status;
@@ -474,7 +478,7 @@ export class AgentRuntime {
         const entry = this.sockets.get(request.id);
         if (entry?.closed !== undefined) return { closed: entry.closed };
         if (!entry) return { closed: "after the client released it" };
-        await this.options.socket!.admit();
+        await this.options.socket!.admit(request.origin ?? null);
         if (entry.closed !== undefined) return { closed: entry.closed };
         try { entry.socket.send(this.decoder.decode(request.body)); }
         catch { this.closeSocket(request.id, "before request dispatch", "failed"); return { closed: entry.closed }; }

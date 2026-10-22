@@ -20,7 +20,7 @@ use std::{
 use nanocode::{
     ClaudeClient, ClaudeHarness, ClaudeModel, CodeModeExecutors, CodeModeHost, HarnessFamily,
     Model, ModelSelection, ModelTransport, Nanocode, NanocodeError, OpenAi, PromptRejection,
-    ServiceTier, Thinking, Tools,
+    ServiceTier, SubagentControl, Thinking, Tools,
     backend::Prompt,
     codex::{
         OpenAiAuth,
@@ -237,6 +237,9 @@ enum Command {
         request_id: String,
         prompt: String,
     },
+    CompletionOrigin {
+        request_id: String,
+    },
     Dispose {},
     Catalog {
         frame: String,
@@ -260,6 +263,7 @@ struct Session {
     inbox: TurnInbox<store::WorkerStore>,
     model: ModelSelection,
     scope: String,
+    subagents: Option<SubagentControl>,
 }
 
 enum Phase {
@@ -494,6 +498,7 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             thinking: thinking.unwrap_or_else(|| model.default_thinking()),
             service_tier: config.service_tier.unwrap_or_default(),
         });
+    let subagents = runtime.subagents().cloned();
     match TurnInbox::open(
         (*runtime).clone(),
         &store,
@@ -512,6 +517,7 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
                 inbox,
                 model,
                 scope: config.scope,
+                subagents,
             })
         }
         Err(error) => {
@@ -887,6 +893,13 @@ fn execute(command: Command) -> Executed {
                 .await
                 .map_err(text)?;
             Ok(Value::Bool(steered))
+        }),
+        Command::CompletionOrigin { request_id } => executed(async move {
+            let origin = match &ready()?.subagents {
+                Some(subagents) => subagents.completion_origin(&request_id).await,
+                None => None,
+            };
+            Ok(json!(origin.as_deref()))
         }),
         Command::Dispose {} => executed(dispose()),
         Command::Catalog {

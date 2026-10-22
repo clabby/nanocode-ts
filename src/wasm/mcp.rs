@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use nanocode::tools::mcp::{Mcp, McpServer, PreparedMcpTool};
+use nanocode::{
+    http::{BoxFuture, Error, Request, Response, Sender, origin},
+    tools::mcp::{Mcp, McpServer, PreparedMcpTool},
+};
 use serde::Deserialize;
 
 use super::transport::WorkerTransport;
@@ -16,6 +19,14 @@ pub struct Server {
     bearer_token: Option<String>,
 }
 
+struct McpTransport;
+
+impl Sender for McpTransport {
+    fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, Error>> {
+        Box::pin(origin::scope(None, WorkerTransport.send(request)))
+    }
+}
+
 pub enum Failure {
     Configuration(String),
     Unavailable(String),
@@ -25,7 +36,7 @@ pub async fn tools(servers: Vec<Server>) -> Result<Vec<PreparedMcpTool>, Failure
     if servers.is_empty() {
         return Ok(Vec::new());
     }
-    let mut builder = Mcp::builder().http_sender(Arc::new(WorkerTransport));
+    let mut builder = Mcp::builder().http_sender(Arc::new(McpTransport));
     for server in servers {
         let mut config = McpServer::http(server.url);
         if let Some(token) = server.bearer_token {
