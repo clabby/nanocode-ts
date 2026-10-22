@@ -15,6 +15,8 @@ export function sessionUuid(): string {
 
 export type HostTool = { name: string; description: string; parameters: Record<string, unknown>; content?: boolean };
 
+export type HandToolSelection = { include?: string[]; exclude?: string[] };
+
 export type AgentConfiguration = {
   scope: string;
   provider?: ModelProvider;
@@ -38,6 +40,7 @@ export type AgentConfiguration = {
   tools?: HostTool[];
   workspace?: string;
   mcp_servers?: McpServer[];
+  hand_tools?: Partial<Record<ModelProvider, HandToolSelection>>;
 };
 
 export type McpServer = { name: string; url: string; headers?: Record<string, string>; bearer_token?: string };

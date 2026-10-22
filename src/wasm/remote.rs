@@ -1,10 +1,10 @@
-use std::{cell::RefCell, time::Duration};
+use std::{cell::RefCell, collections::HashMap, time::Duration};
 
 use nanocode_code_mode::{
     embedded::{CodeModeHostError, HostFuture},
     remote::{
-        RemoteActivity, RemoteCatalog, RemoteClient, RemoteCodeModeHost, RemoteDelivery,
-        RemoteFrame as Frame, RemoteLink,
+        HandToolSelection, RemoteActivity, RemoteCatalog, RemoteClient, RemoteCodeModeHost,
+        RemoteDelivery, RemoteFrame as Frame, RemoteLink,
     },
 };
 use serde_json::{Value, json};
@@ -38,12 +38,38 @@ pub fn busy() -> bool {
     ACTIVITY.with_borrow(|activity| activity.iter().any(RemoteActivity::busy))
 }
 
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSelection {
+    include: Option<Vec<String>>,
+    #[serde(default)]
+    exclude: Vec<String>,
+}
+
+pub struct ToolSelections(pub HashMap<String, ToolSelection>);
+
+impl HandToolSelection for ToolSelections {
+    fn allows(&self, _session_id: &str, backend: &str, name: &str) -> bool {
+        self.0.get(backend).is_none_or(|selection| {
+            selection
+                .include
+                .as_ref()
+                .is_none_or(|names| names.iter().any(|allowed| allowed == name))
+                && !selection.exclude.iter().any(|excluded| excluded == name)
+        })
+    }
+}
+
 struct WorkerLink {
     connection: Option<String>,
+    tool_selection: bool,
     max_frame_bytes: usize,
 }
 
 impl RemoteLink for WorkerLink {
+    fn supports_tool_selection(&self) -> bool {
+        self.tool_selection
+    }
     fn send(
         &self,
         frames: Vec<Frame>,
@@ -128,6 +154,7 @@ pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, Stri
     let (client, driver) = RemoteClient::new(
         WorkerLink {
             connection,
+            tool_selection: catalog.tool_selection,
             max_frame_bytes: catalog
                 .max_frame_bytes
                 .map_or(max_frame_bytes, |peer| peer.min(max_frame_bytes)),

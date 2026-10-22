@@ -107,6 +107,8 @@ struct Configuration {
     workspace: Option<String>,
     #[serde(default)]
     mcp_servers: Vec<mcp::Server>,
+    #[serde(default)]
+    hand_tools: Option<HashMap<String, remote::ToolSelection>>,
 }
 
 impl Configuration {
@@ -256,6 +258,7 @@ type Hand = (String, Arc<dyn CodeModeHost>);
 
 struct Session {
     executors: CodeModeExecutors,
+    hand_tools: Option<Arc<remote::ToolSelections>>,
     hands: RefCell<HashMap<String, Hand>>,
     inbox: TurnInbox<store::WorkerStore>,
     model: ModelSelection,
@@ -410,7 +413,19 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             "code_mode runs cells in this host; leave remote unset",
         ));
     }
+    if let Some(policy) = &config.hand_tools
+        && let Some(backend) = policy
+            .keys()
+            .find(|backend| !matches!(backend.as_str(), "codex" | "claude"))
+    {
+        return Err(configuration(format!(
+            "unsupported hand_tools backend: {backend}"
+        )));
+    }
     let executors = CodeModeExecutors::new();
+    let hand_tools = config
+        .hand_tools
+        .map(|policy| Arc::new(remote::ToolSelections(policy)));
     let placement = config.remote || config.hands;
     let local = config.code_mode;
     let base = match config.workspace.as_deref() {
@@ -460,7 +475,12 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             .as_deref()
             .unwrap_or(if local { "local" } else { "default" })
             .into();
-        executors.insert(Arc::clone(&name), Arc::new(remote::host(None).await?));
+        let host = remote::host(None).await?;
+        let host = match &hand_tools {
+            Some(policy) => host.with_tool_selection(policy.clone()),
+            None => host,
+        };
+        executors.insert(Arc::clone(&name), Arc::new(host));
         executors.set_default(Some(name));
     }
     let instructions = [
@@ -508,6 +528,7 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             bridge::spawn(pump);
             Ok(Session {
                 executors,
+                hand_tools,
                 hands: RefCell::default(),
                 inbox,
                 model,
@@ -568,7 +589,11 @@ async fn init(config: Value) -> Result<Value, String> {
 
 impl Session {
     async fn attach(&self, hand: String, connection: String) -> Result<Value, String> {
-        let host: Arc<dyn CodeModeHost> = Arc::new(remote::host(Some(connection.clone())).await?);
+        let host = remote::host(Some(connection.clone())).await?;
+        let host: Arc<dyn CodeModeHost> = Arc::new(match &self.hand_tools {
+            Some(policy) => host.with_tool_selection(policy.clone()),
+            None => host,
+        });
         self.executors.insert(hand.as_str(), Arc::clone(&host));
         self.hands.borrow_mut().insert(connection, (hand, host));
         Ok(Value::Null)
