@@ -75,6 +75,20 @@ export type LogPage = { events: LoggedEvent[]; next_cursor: number; has_more: bo
 
 export type Driven = { idle?: boolean; busy?: boolean; waiting?: boolean; retry?: boolean; request_id?: string; resumed?: string; finished?: TurnView };
 
+export type BranchPoint = "latest" | { through: string } | { before: string };
+
+export type BranchBoundary = { source_session_id: string; through_turn?: string };
+
+export type SessionRecord = Record<string, unknown> & { session_id: string; branch?: BranchBoundary };
+
+export type BranchExport = { record: SessionRecord; boundary: BranchBoundary; checkpoint: string | null; inherited: string; turns: number; preview: string | null };
+
+export type BranchCursor = { entry: number; offset: number };
+
+export type BranchPage = { cursor: BranchCursor; next: BranchCursor | null; records: { key: string; value: string }[] };
+
+export type BranchSummary = { record: SessionRecord; preview: string | null };
+
 export const RECENT_MODEL_LIMIT = 64;
 
 export type ModelTiming = {
