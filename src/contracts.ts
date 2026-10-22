@@ -116,6 +116,8 @@ export class RemoteRefusal extends Error {}
 export type TurnView = { report: TurnReport; first_seq: number; last_seq: number | null; cancel_requested: boolean; metadata: unknown };
 
 export type Submitted = { submitted: "accepted" | "existing" | "conflict"; turn: TurnView } | { submitted: "too_large"; bytes: number; limit: number };
+export type Replaced = { replaced: "applied" | "already_applied" | "not_queued" | "conflict" } | { replaced: "too_large"; bytes: number; limit: number };
+export type MovedQueued = "moved" | "not_queued" | "not_running" | "conflict" | "unknown";
 
 export type LoggedEvent = { seq: number; request_id: string | null; created_at: number; event: unknown };
 
