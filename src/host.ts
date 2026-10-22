@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type Thinking, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 import { LocalHand } from "./hand.ts";
 
@@ -238,12 +238,16 @@ export class AgentRuntime {
     return await this.command("steer", { request_id: requestId, prompt }) === true;
   }
 
-  async checkThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void> {
-    await this.command("thinking", { thinking, apply: false });
+  async checkThinking(thinking: Thinking): Promise<void> {
+    await this.command("settings", { thinking, apply: false });
   }
 
-  async setThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void> {
-    await this.command("thinking", { thinking, apply: true });
+  async setThinking(thinking: Thinking): Promise<void> {
+    await this.settings({ thinking });
+  }
+
+  async settings(settings: RuntimeSettings): Promise<void> {
+    await this.command("settings", { ...settings, apply: true });
   }
 
   async preconnect(): Promise<void> {

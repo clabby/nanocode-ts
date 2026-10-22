@@ -20,7 +20,7 @@ use std::{
 use nanocode::{
     ClaudeClient, ClaudeHarness, ClaudeModel, CodeModeExecutors, CodeModeHost, HarnessFamily,
     Model, ModelSelection, ModelTransport, Nanocode, NanocodeError, OpenAi, PromptRejection,
-    ServiceTier, Thinking, Tools,
+    ReasoningMode, ServiceTier, Thinking, Tools,
     backend::Prompt,
     codex::{
         OpenAiAuth,
@@ -229,8 +229,11 @@ enum Command {
     },
     Settle {},
     Preconnect {},
-    Thinking {
-        thinking: String,
+    Settings {
+        #[serde(default)]
+        thinking: Option<String>,
+        #[serde(default)]
+        service_tier: Option<ServiceTier>,
         apply: bool,
     },
     Steer {
@@ -743,6 +746,8 @@ fn models() -> Value {
             "efforts": capabilities.thinking().map(Thinking::as_str).collect::<Vec<_>>(),
             "effort": capabilities.default_thinking().as_str(),
             "priority": capabilities.supports_service_tier(ServiceTier::Priority),
+            "service_tiers": capabilities.service_tiers().map(ServiceTier::as_str).collect::<Vec<_>>(),
+            "reasoning_modes": capabilities.reasoning_modes().map(ReasoningMode::as_str).collect::<Vec<_>>(),
             "gateways": gateways,
         })
     };
@@ -862,21 +867,33 @@ fn execute(command: Command) -> Executed {
             ready()?.inbox.agent().preconnect().await.map_err(text)?;
             Ok(Value::Null)
         }),
-        Command::Thinking { thinking, apply } => executed(async move {
-            let thinking = thinking.parse::<Thinking>().map_err(text)?;
-            let session = ready()?;
-            session
-                .model
-                .capabilities(ModelTransport::Native)
-                .check_thinking(thinking)
+        Command::Settings {
+            thinking,
+            service_tier,
+            apply,
+        } => executed(async move {
+            let thinking = thinking
+                .map(|thinking| thinking.parse::<Thinking>())
+                .transpose()
                 .map_err(text)?;
-            if apply {
-                session
-                    .inbox
-                    .agent()
-                    .set_thinking(thinking)
-                    .await
+            let session = ready()?;
+            let capabilities = session.model.capabilities(ModelTransport::Native);
+            if let Some(thinking) = thinking {
+                capabilities.check_thinking(thinking).map_err(text)?;
+            }
+            if let Some(service_tier) = service_tier {
+                capabilities
+                    .check_service_tier(service_tier)
                     .map_err(text)?;
+            }
+            if apply {
+                let agent = session.inbox.agent();
+                if let Some(thinking) = thinking {
+                    agent.set_thinking(thinking).await.map_err(text)?;
+                }
+                if let Some(service_tier) = service_tier {
+                    agent.set_service_tier(service_tier).await.map_err(text)?;
+                }
             }
             Ok(Value::Null)
         }),
