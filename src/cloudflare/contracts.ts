@@ -1,4 +1,4 @@
-import type { AgentConfiguration, ModelProvider } from "../index.ts";
+import type { AgentConfiguration, ModelProvider, ToolCallContext } from "../index.ts";
 
 export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
 
@@ -40,7 +40,7 @@ export interface PrivateBinding {
   fetch(request: Request): Promise<Response>;
 }
 
-export type HostToolCall = { authority: SessionAuthority; name: string; input: unknown; grant?: unknown };
+export type HostToolCall = { authority: SessionAuthority; name: string; input: unknown; context: ToolCallContext; grant?: unknown };
 
 export function json(value: unknown, status = 200, headers?: HeadersInit): Response {
   const result = new Headers(headers);

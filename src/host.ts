@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type SubagentSummary, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 import { LocalHand } from "./hand.ts";
 
@@ -238,6 +238,14 @@ export class AgentRuntime {
     return await this.command("steer", { request_id: requestId, prompt }) === true;
   }
 
+  async interruptSubagent(agent_id: number): Promise<SubagentSummary[]> {
+    return await this.command("interrupt_subagent", { agent_id }) as SubagentSummary[];
+  }
+
+  async closeSubagent(agent_id: number): Promise<SubagentSummary[]> {
+    return await this.command("close_subagent", { agent_id }) as SubagentSummary[];
+  }
+
   async checkThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void> {
     await this.command("thinking", { thinking, apply: false });
   }
@@ -358,7 +366,7 @@ export class AgentRuntime {
         this.models.push(timing);
         if (this.models.length > RECENT_MODEL_LIMIT) this.models.shift();
         let response: Response;
-        try { response = await this.options.dispatch({ endpoint: request.endpoint, method: request.method ?? "POST", headers: request.headers, body: request.body }, controller.signal, timing); }
+        try { response = await this.options.dispatch({ provider: request.provider, endpoint: request.endpoint, method: request.method ?? "POST", headers: request.headers, body: request.body }, controller.signal, timing); }
         catch (error) { this.finishModel(timing, controller.signal.aborted ? "cancelled" : "failed"); throw error; }
         timing.headers_ms = this.elapsed() - timing.started_ms;
         timing.status = response.status;
@@ -424,7 +432,7 @@ export class AgentRuntime {
         this.counters.tool_calls++;
         const controller = new AbortController();
         this.onCancel(id, () => controller.abort());
-        return await this.options.tools.call(request.name, request.input, controller.signal, { call_id: request.call_id }) ?? null;
+        return await this.options.tools.call(request.name, request.input, controller.signal, request.context) ?? null;
       }
       case "file_read": return await this.workspace().read(request.path);
       case "file_write": return await this.workspace().write(request.path, request.contents) ?? null;
@@ -443,7 +451,7 @@ export class AgentRuntime {
         this.models.push(timing);
         if (this.models.length > RECENT_MODEL_LIMIT) this.models.shift();
         let handshake;
-        try { handshake = await this.options.socket.open({ headers: request.headers }, controller.signal, timing); }
+        try { handshake = await this.options.socket.open({ provider: request.provider, headers: request.headers }, controller.signal, timing); }
         catch (error) { this.finishModel(timing, controller.signal.aborted ? "cancelled" : "failed"); throw error; }
         timing.headers_ms = this.elapsed() - timing.started_ms;
         timing.status = handshake.status;

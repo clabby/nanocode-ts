@@ -18,9 +18,9 @@ use std::{
 };
 
 use nanocode::{
-    ClaudeClient, ClaudeHarness, ClaudeModel, CodeModeExecutors, CodeModeHost, HarnessFamily,
-    Model, ModelSelection, ModelTransport, Nanocode, NanocodeError, OpenAi, PromptRejection,
-    ServiceTier, Thinking, Tools,
+    AgentId, ClaudeClient, ClaudeHarness, ClaudeModel, CodeModeExecutors, CodeModeHost,
+    CodexHarness, HarnessFamily, Model, ModelSelection, ModelTransport, Nanocode, NanocodeError,
+    OpenAi, PromptRejection, ServiceTier, SubagentControl, Thinking, Tools,
     backend::Prompt,
     codex::{
         OpenAiAuth,
@@ -31,6 +31,7 @@ use nanocode::{
         Driven, ImportedTurn, InboxError, SessionLog, Submission, Submitted, TurnInbox, TurnRecord,
         TurnState,
     },
+    tool_contract::{Tool, ToolCollection},
 };
 use nanocode_code_mode::remote::PLACEMENT_INSTRUCTIONS;
 use serde::{Deserialize, Serialize};
@@ -64,6 +65,31 @@ impl Provider {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Endpoint {
+    endpoint: String,
+    #[serde(default)]
+    subscription: bool,
+    #[serde(default)]
+    gateway: Option<Gateway>,
+    #[serde(default)]
+    cloudflare_account_id: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    instructions: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Providers {
+    #[serde(default)]
+    claude: Option<Endpoint>,
+    #[serde(default)]
+    codex: Option<Endpoint>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Configuration {
     scope: String,
     session_id: String,
@@ -89,6 +115,8 @@ struct Configuration {
     service_tier: Option<ServiceTier>,
     #[serde(default)]
     subagents: Option<bool>,
+    #[serde(default)]
+    providers: Providers,
     #[serde(default)]
     remote: bool,
     #[serde(default)]
@@ -132,6 +160,28 @@ impl Configuration {
 
     fn thinking(&self) -> Result<Option<Thinking>, String> {
         self.thinking.as_deref().map(str::parse).transpose()
+    }
+
+    fn endpoints(&mut self) -> Result<(Option<Endpoint>, Option<Endpoint>), String> {
+        let root = Endpoint {
+            endpoint: std::mem::take(&mut self.endpoint),
+            subscription: self.subscription,
+            gateway: self.gateway,
+            cloudflare_account_id: self.cloudflare_account_id.take(),
+            max_tokens: self.max_tokens,
+            instructions: None,
+        };
+        let Providers { claude, codex } = std::mem::take(&mut self.providers);
+        match self.provider {
+            Provider::Claude if claude.is_some() => {
+                Err("providers.claude names the session's own provider, which the top-level fields configure".into())
+            }
+            Provider::Codex if codex.is_some() => {
+                Err("providers.codex names the session's own provider, which the top-level fields configure".into())
+            }
+            Provider::Claude => Ok((Some(root), codex)),
+            Provider::Codex => Ok((claude, Some(root))),
+        }
     }
 }
 
@@ -237,6 +287,12 @@ enum Command {
         request_id: String,
         prompt: String,
     },
+    InterruptSubagent {
+        agent_id: u64,
+    },
+    CloseSubagent {
+        agent_id: u64,
+    },
     Dispose {},
     Catalog {
         frame: String,
@@ -260,6 +316,7 @@ struct Session {
     inbox: TurnInbox<store::WorkerStore>,
     model: ModelSelection,
     scope: String,
+    subagents: Option<SubagentControl>,
 }
 
 enum Phase {
@@ -328,131 +385,194 @@ fn described(record: &TurnRecord) -> Result<Value, String> {
     }))
 }
 
-async fn open(config: Configuration) -> Result<Session, Opening> {
+fn claude_harness(
+    endpoint: Endpoint,
+    stream_tool_input: bool,
+    instructions: &dyn Fn(Option<&str>) -> String,
+) -> ClaudeHarness {
+    let http = nanocode::claude::transport::HttpClient::new(
+        nanocode::claude::transport::SenderTransport(transport::WorkerTransport::CLAUDE),
+    );
+    let mut client =
+        ClaudeClient::with_auth_headers(http, endpoint.endpoint, http::HeaderMap::new());
+    if endpoint.subscription {
+        client = client.subscription_compatibility();
+    }
+    let max_tokens = endpoint.max_tokens;
+    let harness = ClaudeHarness::new(client).configure(move |claude| {
+        let claude = claude.tool_input_deltas(stream_tool_input);
+        Ok(match max_tokens {
+            Some(max_tokens) => claude.max_tokens(max_tokens),
+            None => claude,
+        })
+    });
+    match endpoint.instructions.as_deref() {
+        Some(application) => harness.instructions(instructions(Some(application))),
+        None => harness,
+    }
+}
+
+fn codex_harness(
+    endpoint: Endpoint,
+    model: Model,
+    stream_tool_input: bool,
+    instructions: &dyn Fn(Option<&str>) -> String,
+) -> Result<CodexHarness, Opening> {
+    let openai = match (endpoint.subscription, endpoint.gateway) {
+        (true, Some(Gateway::Vercel)) => {
+            return Err(configuration(
+                "the Vercel AI Gateway serves Codex API-key sessions, not ChatGPT subscriptions",
+            ));
+        }
+        (true, Some(Gateway::WorkersAi)) => {
+            return Err(configuration(
+                "Workers AI serves Codex API-key sessions, not ChatGPT subscriptions",
+            ));
+        }
+        (false, Some(Gateway::WorkersAi)) => {
+            let Some(account_id) = endpoint
+                .cloudflare_account_id
+                .as_deref()
+                .filter(|account| !account.trim().is_empty())
+            else {
+                return Err(configuration(
+                    "the Workers AI gateway needs cloudflare_account_id",
+                ));
+            };
+            OpenAi::builder(OpenAiAuth::gateway_managed())
+                .chat_gateway(ChatGateway::workers_ai(account_id))
+        }
+        (true, None) => OpenAi::builder(OpenAiAuth::host_managed_chatgpt())
+            .transport(ResponsesTransport::WebSocket)
+            .websocket_warmup(false),
+        (false, Some(Gateway::Vercel)) => OpenAi::builder(OpenAiAuth::gateway_managed())
+            .responses_gateway(ResponsesGateway::vercel()),
+        (false, None) => {
+            OpenAi::builder(OpenAiAuth::gateway_managed()).transport(ResponsesTransport::Https)
+        }
+    };
+    let openai = match endpoint.gateway {
+        Some(Gateway::WorkersAi) => openai,
+        _ => openai.api_base_url(endpoint.endpoint),
+    };
+    let harness = CodexHarness::new(
+        openai
+            .model(model)
+            .tool_input_deltas(stream_tool_input)
+            .host_transport(transport::WorkerTransport::CODEX)
+            .build()
+            .map_err(configuration)?,
+    );
+    Ok(match endpoint.instructions.as_deref() {
+        Some(application) => harness.instructions(instructions(Some(application))),
+        None => harness,
+    })
+}
+
+async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let coalesce = Duration::from_millis(config.event_coalesce_ms);
     let store =
         nanocode::session_store(SqlStore::new(store::WorkerStore::durability())).map_err(text)?;
     let model = config.model().map_err(configuration)?;
     let thinking = config.thinking().map_err(configuration)?;
-    let mut builder = Nanocode::builder();
-    builder = match config.provider {
-        Provider::Claude => {
-            let http = nanocode::claude::transport::HttpClient::new(
-                nanocode::claude::transport::SenderTransport(transport::WorkerTransport),
-            );
-            let mut client =
-                ClaudeClient::with_auth_headers(http, config.endpoint, http::HeaderMap::new());
-            if config.subscription {
-                client = client.subscription_compatibility();
-            }
-            let max_tokens = config.max_tokens;
-            let stream_tool_input = config.stream_tool_input;
-            builder.claude(ClaudeHarness::new(client).configure(move |claude| {
-                let claude = claude.tool_input_deltas(stream_tool_input);
-                Ok(match max_tokens {
-                    Some(max_tokens) => claude.max_tokens(max_tokens),
-                    None => claude,
-                })
-            }))
-        }
-        Provider::Codex => {
-            let Some(codex) = model.as_codex() else {
-                return Err(configuration(format!("{model} is not a Codex model")));
-            };
-            let openai = match (config.subscription, config.gateway) {
-                (true, Some(Gateway::Vercel)) => {
-                    return Err(configuration(
-                        "the Vercel AI Gateway serves Codex API-key sessions, not ChatGPT subscriptions",
-                    ));
-                }
-                (true, Some(Gateway::WorkersAi)) => {
-                    return Err(configuration(
-                        "Workers AI serves Codex API-key sessions, not ChatGPT subscriptions",
-                    ));
-                }
-                (false, Some(Gateway::WorkersAi)) => {
-                    let Some(account_id) = config
-                        .cloudflare_account_id
-                        .as_deref()
-                        .filter(|account| !account.trim().is_empty())
-                    else {
-                        return Err(configuration(
-                            "the Workers AI gateway needs cloudflare_account_id",
-                        ));
-                    };
-                    OpenAi::builder(OpenAiAuth::gateway_managed())
-                        .chat_gateway(ChatGateway::workers_ai(account_id))
-                }
-                (true, None) => OpenAi::builder(OpenAiAuth::host_managed_chatgpt())
-                    .transport(ResponsesTransport::WebSocket)
-                    .websocket_warmup(false),
-                (false, Some(Gateway::Vercel)) => OpenAi::builder(OpenAiAuth::gateway_managed())
-                    .responses_gateway(ResponsesGateway::vercel()),
-                (false, None) => OpenAi::builder(OpenAiAuth::gateway_managed())
-                    .transport(ResponsesTransport::Https),
-            };
-            let openai = match config.gateway {
-                Some(Gateway::WorkersAi) => openai,
-                _ => openai.api_base_url(config.endpoint),
-            };
-            builder.openai(
-                openai
-                    .model(codex)
-                    .tool_input_deltas(config.stream_tool_input)
-                    .host_transport(transport::WorkerTransport)
-                    .build()
-                    .map_err(configuration)?,
-            )
-        }
-    };
     if config.code_mode && config.remote {
         return Err(configuration(
             "code_mode runs cells in this host; leave remote unset",
         ));
     }
-    let executors = CodeModeExecutors::new();
     let placement = config.remote || config.hands;
     let local = config.code_mode;
-    let base = match config.workspace.as_deref() {
-        Some(root) => match config.provider {
-            Provider::Claude => nanocode::claude::host_tools(
-                root.into(),
-                Arc::new(workspace::HostFiles),
-                Arc::new(workspace::HostShell),
-            ),
-            Provider::Codex => nanocode::codex_tools::host_tools(
-                root.into(),
-                Arc::new(workspace::HostFiles),
-                Arc::new(workspace::HostShell),
-            ),
-        }
-        .map_err(configuration)?
-        .into_builder(),
-        None => Tools::builder().without_defaults(),
-    };
-    let base = if placement {
-        base.tool(executors.tool())
-    } else {
-        base
-    };
-    let base = mcp::tools(config.mcp_servers)
-        .await
-        .map_err(|failure| match failure {
-            mcp::Failure::Configuration(error) => configuration(error),
-            mcp::Failure::Unavailable(error) => Opening::Failed(error),
-        })?
+    let instructions = |application: Option<&str>| {
+        [
+            application,
+            placement.then_some(PLACEMENT_INSTRUCTIONS),
+            local.then_some(LOCAL_INSTRUCTIONS),
+        ]
         .into_iter()
-        .fold(base, |selected, tool| selected.tool(tool));
-    let selected = tools::tools(config.tools)
-        .fold(base, |selected, tool| selected.tool(tool))
-        .build()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n\n")
+    };
+    let (claude, codex) = config.endpoints().map_err(configuration)?;
+    let claude =
+        claude.map(|endpoint| claude_harness(endpoint, config.stream_tool_input, &instructions));
+    let codex = match codex {
+        Some(endpoint) => {
+            let default = match config.provider {
+                Provider::Codex => model.as_codex(),
+                Provider::Claude => Some(Model::Sol),
+            };
+            let Some(default) = default else {
+                return Err(configuration(format!("{model} is not a Codex model")));
+            };
+            Some(codex_harness(
+                endpoint,
+                default,
+                config.stream_tool_input,
+                &instructions,
+            )?)
+        }
+        None => None,
+    };
+    let executors = CodeModeExecutors::new();
+    let mut shared: Vec<Arc<dyn Tool>> = Vec::new();
+    if placement {
+        shared.push(Arc::new(executors.tool()));
+    }
+    shared.extend(
+        mcp::tools(config.mcp_servers)
+            .await
+            .map_err(|failure| match failure {
+                mcp::Failure::Configuration(error) => configuration(error),
+                mcp::Failure::Unavailable(error) => Opening::Failed(error),
+            })?
+            .into_iter()
+            .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
+    );
+    shared.extend(tools::tools(config.tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
+    let selected = |family: Provider| -> Result<Tools, Opening> {
+        let base = match config.workspace.as_deref() {
+            Some(root) => match family {
+                Provider::Claude => nanocode::claude::host_tools(
+                    root.into(),
+                    Arc::new(workspace::HostFiles),
+                    Arc::new(workspace::HostShell),
+                ),
+                Provider::Codex => nanocode::codex_tools::host_tools(
+                    root.into(),
+                    Arc::new(workspace::HostFiles),
+                    Arc::new(workspace::HostShell),
+                ),
+            },
+            None => Tools::builder().without_defaults().build(),
+        }
         .map_err(configuration)?;
+        let tools = shared
+            .iter()
+            .try_fold(base, |tools, tool| tools.add_shared_tool(Arc::clone(tool)))
+            .map_err(configuration)?;
+        if !(placement || local) {
+            return Ok(tools);
+        }
+        tools
+            .into_builder()
+            .without_defaults()
+            .code_mode_host(executors.clone())
+            .build()
+            .map_err(configuration)
+    };
+    let mut builder = Nanocode::builder();
+    if let Some(harness) = claude {
+        builder = builder.claude(harness.tools(selected(Provider::Claude)?));
+    }
+    if let Some(harness) = codex {
+        builder = builder.openai(harness.tools(selected(Provider::Codex)?));
+    }
     if config.subagents == Some(false) {
         builder = builder.without_subagents();
     }
     builder = builder
         .workspace(config.workspace.as_deref().unwrap_or("/"))
-        .tools(selected)
         .durability(store.clone());
     if config.remote || local {
         let name: Arc<str> = config
@@ -463,26 +583,14 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
         executors.insert(Arc::clone(&name), Arc::new(remote::host(None).await?));
         executors.set_default(Some(name));
     }
-    let instructions = [
-        config.instructions.as_deref(),
-        placement.then_some(PLACEMENT_INSTRUCTIONS),
-        local.then_some(LOCAL_INSTRUCTIONS),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join("\n\n");
-    if !instructions.is_empty() {
-        builder = builder.instructions(instructions);
-    }
-    if placement || local {
-        builder = builder
-            .code_mode_host(executors.clone())
-            .map_err(configuration)?;
+    let session_instructions = instructions(config.instructions.as_deref());
+    if !session_instructions.is_empty() {
+        builder = builder.instructions(session_instructions);
     }
     let runtime = builder
         .build()
         .map_err(|error| configuration(format!("build runtime: {error}")))?;
+    let subagents = runtime.subagents().cloned();
     let host = Arc::new(events::WorkerInbox::new(
         config.runtime_id,
         config.started_ms,
@@ -512,6 +620,7 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
                 inbox,
                 model,
                 scope: config.scope,
+                subagents,
             })
         }
         Err(error) => {
@@ -579,6 +688,12 @@ impl Session {
             self.executors.remove_host(&hand, &host);
         }
         Value::Null
+    }
+
+    fn subagents(&self) -> Result<&SubagentControl, String> {
+        self.subagents
+            .as_ref()
+            .ok_or_else(|| "the session has no subagents".into())
     }
 
     async fn drive(&self, next: Option<&str>) -> Result<Value, String> {
@@ -887,6 +1002,22 @@ fn execute(command: Command) -> Executed {
                 .await
                 .map_err(text)?;
             Ok(Value::Bool(steered))
+        }),
+        Command::InterruptSubagent { agent_id } => executed(async move {
+            let session = ready()?;
+            session
+                .subagents()?
+                .interrupt(session.inbox.session_id(), AgentId::new(agent_id))
+                .await
+                .map_err(text)
+        }),
+        Command::CloseSubagent { agent_id } => executed(async move {
+            let session = ready()?;
+            session
+                .subagents()?
+                .close(session.inbox.session_id(), AgentId::new(agent_id))
+                .await
+                .map_err(text)
         }),
         Command::Dispose {} => executed(dispose()),
         Command::Catalog {

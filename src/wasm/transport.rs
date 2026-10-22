@@ -18,7 +18,14 @@ use serde_json::{Value, json};
 
 use super::bridge::{Reply, call, call_with_body};
 
-pub struct WorkerTransport;
+#[derive(Clone, Copy)]
+pub struct WorkerTransport(Option<&'static str>);
+
+impl WorkerTransport {
+    pub const CLAUDE: Self = Self(Some("claude"));
+    pub const CODEX: Self = Self(Some("codex"));
+    pub const MCP: Self = Self(None);
+}
 
 fn host_error(value: impl std::fmt::Display) -> HostError {
     HostError::new(value.to_string())
@@ -73,7 +80,7 @@ impl Sender for WorkerTransport {
         Box::pin(async move {
             let headers = header_pairs(&request.headers).map_err(layer_error)?;
             let started = call_with_body(
-                json!({"op": "http_start", "endpoint": request.url, "method": request.method.as_str(), "headers": headers}),
+                json!({"op": "http_start", "provider": self.0, "endpoint": request.url, "method": request.method.as_str(), "headers": headers}),
                 &request.body,
             )
             .await
@@ -166,7 +173,7 @@ impl HostTransport for WorkerTransport {
     ) -> HostFuture<'a, Result<ConnectedHost, HostError>> {
         Box::pin(async move {
             let headers = request.socket_headers()?;
-            let opened = call(json!({"op": "socket_open", "headers": header_pairs(&headers).map_err(host_error)?}))
+            let opened = call(json!({"op": "socket_open", "provider": self.0, "headers": header_pairs(&headers).map_err(host_error)?}))
                 .await
                 .map_err(host_error)?;
             let status = status(&opened).map_err(host_error)?;

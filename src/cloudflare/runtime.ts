@@ -581,14 +581,14 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local !== undefined, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(options.instructions === undefined ? {} : { instructions: options.instructions }), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(shell ? { workspace: shell.cwd } : {}) }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
           tools: options.tools && {
-            call: async (name, input, signal) => {
+            call: async (name, input, signal, context) => {
               if (this.dispatchBlocked(scope)) throw new Error("request authority stopped");
               await this.durable(scope);
               this.counts.host_tool_calls++;
               const crash = this.crash;
               this.crash = undefined;
               if (crash !== undefined) setTimeout(() => this.ctx.abort(`chaos: the session object was reset during ${name}`), crash);
-              return options.tools!.call({ authority: { account_id: authority.account_id, session_id: authority.session_id }, name, input, grant: this.turnGrant(scope, descriptor) }, this.env, signal);
+              return options.tools!.call({ authority: { account_id: authority.account_id, session_id: authority.session_id }, name, input, context, grant: this.turnGrant(scope, descriptor) }, this.env, signal);
             },
           },
           remote: {
@@ -626,7 +626,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             if (this.dispatchBlocked(scope)) throw new Error("request authority stopped");
             await this.durable(scope);
             this.counts.model_dispatches++;
-            const dispatch: ModelDispatch = { endpoint: request.endpoint, headers: request.headers, authority, provider: descriptor.provider ?? "claude", subscription: descriptor.subscription };
+            const dispatch: ModelDispatch = { endpoint: request.endpoint, headers: request.headers, authority, provider: request.provider ?? descriptor.provider ?? "claude", subscription: descriptor.subscription };
             const response = await options.egress(this.env).fetch(new Request("https://egress.internal/model", { method: "POST", signal, headers: { "content-type": "application/octet-stream", "x-nanocode-model": headerJson(dispatch) }, body: request.body }));
             const diagnostic = response.headers.get("x-nanocode-model-diagnostic");
             if (diagnostic) {
@@ -641,7 +641,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           socket: {
             open: async (request, signal, timing) => {
               if (this.dispatchBlocked(scope)) throw new Error("request authority stopped");
-              const response = await options.egress(this.env).fetch(new Request("https://egress.internal/socket", { signal, headers: { upgrade: "websocket", "x-nanocode-socket": headerJson({ authority, provider: descriptor.provider ?? "claude", headers: request.headers }) } }));
+              const response = await options.egress(this.env).fetch(new Request("https://egress.internal/socket", { signal, headers: { upgrade: "websocket", "x-nanocode-socket": headerJson({ authority, provider: request.provider, headers: request.headers }) } }));
               this.diagnostic(scope, response.headers.get("x-nanocode-model-diagnostic"), timing);
               const socket = response.status === 101 ? response.webSocket ?? undefined : undefined;
               socket?.accept();
