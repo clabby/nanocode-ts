@@ -23,6 +23,15 @@ export type ReasoningMode = "standard" | "pro";
 
 export type RuntimeSettings = { thinking?: Thinking; service_tier?: ServiceTier };
 
+export type ProviderEndpoint = {
+  endpoint: string;
+  subscription?: boolean;
+  gateway?: "vercel" | "workers_ai";
+  cloudflare_account_id?: string;
+  max_tokens?: number;
+  instructions?: string;
+};
+
 export type AgentConfiguration = {
   scope: string;
   provider?: ModelProvider;
@@ -37,6 +46,7 @@ export type AgentConfiguration = {
   max_tokens?: number;
   service_tier?: ServiceTier;
   subagents?: boolean;
+  providers?: Partial<Record<ModelProvider, ProviderEndpoint>>;
   remote?: boolean;
   executor?: string;
   hands?: boolean;
@@ -55,6 +65,33 @@ export type ModelGateway = "direct" | "vercel" | "workers_ai";
 export type ModelEntry = { id: string; name: string; efforts: Thinking[]; effort: Thinking; priority: boolean; service_tiers: ServiceTier[]; reasoning_modes: ReasoningMode[]; gateways: ModelGateway[] };
 
 export type ModelCatalog = { harnesses: { id: ModelProvider; models: ModelEntry[] }[] };
+
+export type ToolCallContext = {
+  session_id: string;
+  call_id: string;
+  turn_id: string | null;
+  model: string;
+  instruction_revision: number | null;
+};
+
+export type SubagentStatus =
+  | { state: "pending" | "running" | "interrupted" | "closing" | "closed" }
+  | { state: "completed"; output: unknown }
+  | { state: "failed"; error: string };
+
+export type SubagentSummary = {
+  agent_id: number;
+  role: string;
+  task: string;
+  parent_agent_id: number | null;
+  status: SubagentStatus;
+  model?: string | { backend: string; model: string };
+  thinking?: Thinking;
+  reasoning_mode: "standard" | "pro";
+  last_output?: unknown;
+  completion_revision?: number;
+  usage?: Record<string, unknown>;
+};
 
 export type TurnReport = Record<string, unknown> & { request_id: string; status: string };
 
@@ -147,14 +184,14 @@ export type HostOptions = {
 };
 
 export type RuntimeOptions = {
-  dispatch(request: { endpoint: string; method: string; headers: [string, string][]; body: Uint8Array }, signal: AbortSignal, timing: RuntimeTiming): Promise<Response>;
+  dispatch(request: { provider: ModelProvider | null; endpoint: string; method: string; headers: [string, string][]; body: Uint8Array }, signal: AbortSignal, timing: RuntimeTiming): Promise<Response>;
   finishing?(request_id: string): Record<string, unknown> | Promise<Record<string, unknown>>;
   socket?: {
-    open(request: { headers: [string, string][] }, signal: AbortSignal, timing: RuntimeTiming): Promise<SocketHandshake>;
+    open(request: { provider: ModelProvider; headers: [string, string][] }, signal: AbortSignal, timing: RuntimeTiming): Promise<SocketHandshake>;
     admit(): Promise<void>;
   };
   tools?: {
-    call(name: string, input: unknown, signal: AbortSignal, context: { call_id: string }): Promise<unknown>;
+    call(name: string, input: unknown, signal: AbortSignal, context: ToolCallContext): Promise<unknown>;
   };
   workspace?: WorkspaceHost;
   remote?: {

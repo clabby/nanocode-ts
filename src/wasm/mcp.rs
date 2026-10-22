@@ -25,7 +25,7 @@ pub async fn tools(servers: Vec<Server>) -> Result<Vec<PreparedMcpTool>, Failure
     if servers.is_empty() {
         return Ok(Vec::new());
     }
-    let mut builder = Mcp::builder().http_sender(Arc::new(WorkerTransport));
+    let mut builder = Mcp::builder().http_sender(Arc::new(WorkerTransport::MCP));
     for server in servers {
         let mut config = McpServer::http(server.url);
         if let Some(token) = server.bearer_token {
