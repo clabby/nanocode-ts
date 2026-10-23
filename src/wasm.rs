@@ -30,8 +30,8 @@ use nanocode::{
     },
     durability::{InitialSettings, SessionRecord, SqlStore},
     session_host::{
-        Driven, ImportedTurn, InboxError, LogEntry, SessionLog, Submission, Submitted, TurnInbox,
-        TurnRecord, TurnState,
+        Driven, ImportedTurn, InboxError, LogEntry, MovedQueued, Replaced, SessionLog, Submission,
+        Submitted, TurnInbox, TurnRecord, TurnState,
     },
     tool_contract::{Tool, ToolCollection},
 };
@@ -368,6 +368,19 @@ enum Command {
     Steer {
         request_id: String,
         prompt: String,
+        #[serde(default)]
+        into: Option<String>,
+    },
+    Replace {
+        scope: String,
+        request_id: String,
+        edit_id: String,
+        text: String,
+    },
+    MoveQueued {
+        request_id: String,
+        #[serde(default)]
+        into: Option<String>,
     },
     InterruptSubagent {
         agent_id: u64,
@@ -931,6 +944,31 @@ async fn append(scope: &str, events: Vec<Annotation>) -> Result<Value, String> {
     Ok(json!({"appended": logged}))
 }
 
+async fn replace(
+    scope: &str,
+    request_id: &str,
+    edit_id: &str,
+    edited: &str,
+) -> Result<Value, String> {
+    let status = match log(scope)
+        .replace_queued(request_id, edit_id, edited)
+        .await
+        .map_err(text)?
+    {
+        Replaced::Applied(Some(event)) => {
+            events::publish(vec![event]).await?;
+            "applied"
+        }
+        Replaced::Applied(None) => "already_applied",
+        Replaced::NotQueued => "not_queued",
+        Replaced::Conflict => "conflict",
+        Replaced::TooLarge { bytes, limit } => {
+            return Ok(json!({"replaced": "too_large", "bytes": bytes, "limit": limit}));
+        }
+    };
+    Ok(json!({"replaced": status}))
+}
+
 async fn cancel(
     scope: &str,
     request_id: &str,
@@ -1239,10 +1277,14 @@ fn execute(command: Command) -> Executed {
             }
             Ok(Value::Null)
         }),
-        Command::Steer { request_id, prompt } => executed(async move {
+        Command::Steer {
+            request_id,
+            prompt,
+            into,
+        } => executed(async move {
             let steered = ready()?
                 .inbox
-                .steer(&request_id, Prompt::from(prompt))
+                .steer(into.as_deref(), &request_id, Prompt::from(prompt))
                 .await
                 .map_err(text)?;
             Ok(Value::Bool(steered))
@@ -1269,6 +1311,26 @@ fn execute(command: Command) -> Executed {
                 None => None,
             };
             Ok(json!(origin.as_deref()))
+        }),
+        Command::Replace {
+            scope,
+            request_id,
+            edit_id,
+            text: edited,
+        } => executed(async move { replace(&scope, &request_id, &edit_id, &edited).await }),
+        Command::MoveQueued { request_id, into } => executed(async move {
+            let moved = ready()?
+                .inbox
+                .move_queued(&request_id, into.as_deref())
+                .await
+                .map_err(text)?;
+            Ok(json!({"moved": match moved {
+                MovedQueued::Moved => "moved",
+                MovedQueued::NotQueued => "not_queued",
+                MovedQueued::NotRunning => "not_running",
+                MovedQueued::Conflict => "conflict",
+                MovedQueued::Unknown => "unknown",
+            }}))
         }),
         Command::Dispose {} => executed(dispose()),
         Command::Catalog {
