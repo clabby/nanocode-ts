@@ -1,4 +1,4 @@
-import type { ModelProvider, Thinking } from "../index.ts";
+import type { ModelProvider, Thinking, ToolCallContext } from "../index.ts";
 
 export type { Thinking };
 
@@ -40,7 +40,7 @@ export interface PrivateBinding {
   fetch(request: Request): Promise<Response>;
 }
 
-export type HostToolCall = { authority: SessionAuthority; name: string; input: unknown; grant?: unknown };
+export type HostToolCall = { authority: SessionAuthority; name: string; input: unknown; context: ToolCallContext; grant?: unknown };
 
 export function json(value: unknown, status = 200, headers?: HeadersInit): Response {
   const result = new Headers(headers);
