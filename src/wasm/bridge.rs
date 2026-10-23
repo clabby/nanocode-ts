@@ -24,6 +24,7 @@ unsafe extern "C" {
     );
     fn cancel(id: u32);
     fn clock(monotonic: u32) -> f64;
+    fn calendar_date(pointer: *const u8, length: usize) -> u32;
     fn random(pointer: *mut u8, length: usize);
     fn reply(id: u32, pointer: *const u8, length: usize);
     fn panicked(pointer: *const u8, length: usize);
@@ -109,6 +110,18 @@ pub async fn call_with_body(request: Value, body: &[u8]) -> Result<Value, Value>
 
 pub fn monotonic_ms() -> f64 {
     unsafe { clock(1) }
+}
+
+pub fn local_date(timezone: &str) -> Option<String> {
+    let date = unsafe { calendar_date(timezone.as_ptr(), timezone.len()) };
+    (date != 0).then(|| {
+        format!(
+            "{:04}-{:02}-{:02}",
+            date / 10_000,
+            date / 100 % 100,
+            date % 100
+        )
+    })
 }
 
 fn settle(reply: Reply) -> Result<Value, Value> {

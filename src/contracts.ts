@@ -24,11 +24,21 @@ export type ProviderEndpoint = {
   instructions?: string;
 };
 
+export type Thinking = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export type ServiceTier = "standard" | "priority" | "fast" | "ultrafast";
+
+export type ReasoningMode = "standard" | "pro";
+
+export type RuntimeSettings = { thinking?: Thinking; service_tier?: ServiceTier };
+
+export type HandToolSelection = { include?: string[]; exclude?: string[] };
+
 export type AgentConfiguration = {
   scope: string;
   provider?: ModelProvider;
   model?: string;
-  thinking?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
+  thinking?: Thinking;
   instructions?: string;
   session_id: string;
   subscription: boolean;
@@ -36,7 +46,7 @@ export type AgentConfiguration = {
   gateway?: "vercel" | "workers_ai";
   cloudflare_account_id?: string;
   max_tokens?: number;
-  service_tier?: "standard" | "priority" | "fast";
+  service_tier?: ServiceTier;
   subagents?: boolean;
   providers?: Partial<Record<ModelProvider, ProviderEndpoint>>;
   remote?: boolean;
@@ -45,18 +55,18 @@ export type AgentConfiguration = {
   code_mode?: boolean;
   event_coalesce_ms?: number;
   stream_tool_input?: boolean;
+  environment?: { cwd?: string; shell?: string; timezone?: string };
   tools?: HostTool[];
   workspace?: string;
   mcp_servers?: McpServer[];
+  hand_tools?: Partial<Record<ModelProvider, HandToolSelection>>;
 };
 
 export type McpServer = { name: string; url: string; headers?: Record<string, string>; bearer_token?: string };
 
-export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
-
 export type ModelGateway = "direct" | "vercel" | "workers_ai";
 
-export type ModelEntry = { id: string; name: string; efforts: Thinking[]; effort: Thinking; priority: boolean; gateways: ModelGateway[] };
+export type ModelEntry = { id: string; name: string; efforts: Thinking[]; effort: Thinking; priority: boolean; service_tiers: ServiceTier[]; reasoning_modes: ReasoningMode[]; gateways: ModelGateway[]; context_window_tokens: number; auto_compact_token_limit: number | null };
 
 export type ModelCatalog = { harnesses: { id: ModelProvider; models: ModelEntry[] }[] };
 
@@ -66,6 +76,7 @@ export type ToolCallContext = {
   turn_id: string | null;
   model: string;
   instruction_revision: number | null;
+  origin: string | null;
 };
 
 export type SubagentStatus =
@@ -105,12 +116,32 @@ export class RemoteRefusal extends Error {}
 export type TurnView = { report: TurnReport; first_seq: number; last_seq: number | null; cancel_requested: boolean; metadata: unknown };
 
 export type Submitted = { submitted: "accepted" | "existing" | "conflict"; turn: TurnView } | { submitted: "too_large"; bytes: number; limit: number };
+export type Replaced = { replaced: "applied" | "already_applied" | "not_queued" | "conflict" } | { replaced: "too_large"; bytes: number; limit: number };
+export type MovedQueued = "moved" | "not_queued" | "not_running" | "conflict" | "unknown";
 
 export type LoggedEvent = { seq: number; request_id: string | null; created_at: number; event: unknown };
 
 export type LogPage = { events: LoggedEvent[]; next_cursor: number; has_more: boolean };
 
+export type HostEvent = { source: string; [field: string]: unknown };
+
 export type Driven = { idle?: boolean; busy?: boolean; waiting?: boolean; retry?: boolean; request_id?: string; resumed?: string; finished?: TurnView };
+
+export type Compacted = { compacted: true } | { busy: true };
+
+export type BranchPoint = "latest" | { through: string } | { before: string };
+
+export type BranchBoundary = { source_session_id: string; through_turn?: string };
+
+export type SessionRecord = Record<string, unknown> & { session_id: string; branch?: BranchBoundary };
+
+export type BranchExport = { record: SessionRecord; boundary: BranchBoundary; checkpoint: string | null; inherited: string; turns: number; preview: string | null };
+
+export type BranchCursor = { entry: number; offset: number };
+
+export type BranchPage = { cursor: BranchCursor; next: BranchCursor | null; records: { key: string; value: string }[] };
+
+export type BranchSummary = { record: SessionRecord; preview: string | null };
 
 export const RECENT_MODEL_LIMIT = 64;
 
@@ -159,7 +190,7 @@ export type SocketHandshake = {
   text(): Promise<string>;
 };
 
-export type RemoteRequest = { op: string; connection?: string | null; frames?: string[]; durable?: boolean; dispatches?: boolean; reason?: string };
+export type RemoteRequest = { op: string; connection?: string | null; frames?: string[]; durable?: boolean; dispatches?: boolean; origins?: { index: number; origin: string | null }[]; refused?: number[]; reason?: string };
 
 export type ShellRun = { command: string; cwd: string; timeout_ms: number | null };
 
@@ -172,17 +203,20 @@ export interface WorkspaceHost {
   run(request: ShellRun, signal: AbortSignal): Promise<ShellOutput>;
 }
 
+export type LogPageOptions = { request_id?: string; max_bytes?: number };
+
 export type HostOptions = {
+  log_logical_limit?: number;
   published(events: LoggedEvent[], bytes: number[]): void;
   wake?(): void;
 };
 
 export type RuntimeOptions = {
-  dispatch(request: { provider: ModelProvider | null; endpoint: string; method: string; headers: [string, string][]; body: Uint8Array }, signal: AbortSignal, timing: RuntimeTiming): Promise<Response>;
+  dispatch(request: { provider: ModelProvider | null; endpoint: string; method: string; headers: [string, string][]; body: Uint8Array; origin: string | null }, signal: AbortSignal, timing: RuntimeTiming): Promise<Response>;
   finishing?(request_id: string): Record<string, unknown> | Promise<Record<string, unknown>>;
   socket?: {
-    open(request: { provider: ModelProvider; headers: [string, string][] }, signal: AbortSignal, timing: RuntimeTiming): Promise<SocketHandshake>;
-    admit(): Promise<void>;
+    open(request: { provider: ModelProvider; headers: [string, string][]; origin: string | null }, signal: AbortSignal, timing: RuntimeTiming): Promise<SocketHandshake>;
+    admit(origin: string | null): Promise<void>;
   };
   tools?: {
     call(name: string, input: unknown, signal: AbortSignal, context: ToolCallContext): Promise<unknown>;

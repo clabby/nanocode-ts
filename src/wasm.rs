@@ -1,3 +1,4 @@
+mod branch;
 mod bridge;
 mod events;
 mod mcp;
@@ -20,16 +21,20 @@ use std::{
 use nanocode::{
     AgentId, ClaudeClient, ClaudeHarness, ClaudeModel, CodeModeExecutors, CodeModeHost,
     CodexHarness, HarnessFamily, Model, ModelSelection, ModelTransport, Nanocode, NanocodeError,
-    OpenAi, PromptRejection, ServiceTier, SubagentControl, Thinking, Tools,
+    OpenAi, PromptRejection, ReasoningMode, ServiceTier, SubagentControl, Thinking, Tools,
+    agent::ExecutionEnvironment,
     backend::Prompt,
+    claude::ClaudeEnvironment,
     codex::{
-        OpenAiAuth,
+        CONTEXT_WINDOW_TOKENS, OpenAiAuth, auto_compact_token_limit,
         transport::{ChatGateway, ResponsesGateway, ResponsesTransport},
     },
-    durability::{InitialSettings, SessionRecord, SqlStore},
+    durability::{
+        BranchCursor, BranchExport, BranchPage, InitialSettings, SessionRecord, SqlStore,
+    },
     session_host::{
-        Driven, ImportedTurn, InboxError, SessionLog, Submission, Submitted, TurnInbox, TurnRecord,
-        TurnState,
+        Driven, ImportedTurn, InboxError, LogEntry, LoggedEvent, MovedQueued, Replaced, SessionLog,
+        Submission, Submitted, TurnInbox, TurnRecord, TurnState,
     },
     tool_contract::{Tool, ToolCollection},
 };
@@ -130,11 +135,72 @@ struct Configuration {
     #[serde(default)]
     stream_tool_input: bool,
     #[serde(default)]
+    environment: Option<Environment>,
+    #[serde(default)]
     tools: Vec<tools::HostTool>,
     #[serde(default)]
     workspace: Option<String>,
     #[serde(default)]
     mcp_servers: Vec<mcp::Server>,
+    #[serde(default)]
+    hand_tools: Option<HashMap<String, remote::ToolSelection>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Environment {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    shell: Option<String>,
+    #[serde(default)]
+    timezone: Option<String>,
+}
+
+impl Environment {
+    fn resolve(mut self, workspace: Option<&str>) -> Result<Self, String> {
+        if let Some(timezone) = self.timezone.as_deref()
+            && bridge::local_date(timezone).is_none()
+        {
+            return Err(format!("unknown timezone {timezone}"));
+        }
+        match (self.cwd.as_deref(), workspace) {
+            (Some(cwd), Some(workspace)) if cwd != workspace => Err(format!(
+                "environment.cwd {cwd} differs from workspace {workspace}, where the workspace tools run"
+            )),
+            (None, Some(workspace)) => {
+                self.cwd = Some(workspace.to_owned());
+                Ok(self)
+            }
+            _ => Ok(self),
+        }
+    }
+
+    fn codex(&self) -> ExecutionEnvironment {
+        let timezone: Arc<str> = self.timezone.as_deref().unwrap_or("Etc/UTC").into();
+        let zone = Arc::clone(&timezone);
+        let mut environment = ExecutionEnvironment::dated(timezone, move || {
+            bridge::local_date(&zone).unwrap_or_default()
+        });
+        if let Some(cwd) = &self.cwd {
+            environment = environment.working_directory(cwd.as_str());
+        }
+        if let Some(shell) = &self.shell {
+            environment = environment.shell(shell.as_str());
+        }
+        environment
+    }
+
+    fn claude(&self) -> ClaudeEnvironment {
+        let mut environment = ClaudeEnvironment::new();
+        if let Some(cwd) = &self.cwd {
+            environment = environment.working_directory(cwd.as_str());
+        }
+        if let Some(shell) = &self.shell {
+            environment = environment.shell(shell.as_str());
+        }
+        environment
+    }
 }
 
 impl Configuration {
@@ -206,11 +272,20 @@ struct Legacy {
 }
 
 #[derive(Deserialize)]
+struct Annotation {
+    #[serde(default)]
+    request_id: Option<String>,
+    event: Box<RawValue>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Command {
     Configure {
         #[serde(default)]
         value_limit: Option<usize>,
+        #[serde(default)]
+        logical_limit: Option<usize>,
     },
     Init {
         config: Value,
@@ -222,6 +297,10 @@ enum Command {
         #[serde(default)]
         hand: Option<String>,
         metadata: Value,
+    },
+    Append {
+        scope: String,
+        events: Vec<Annotation>,
     },
     Turn {
         scope: String,
@@ -261,6 +340,8 @@ enum Command {
         limit: usize,
         #[serde(default)]
         request_id: Option<String>,
+        #[serde(default)]
+        max_bytes: Option<usize>,
     },
     Import {
         scope: String,
@@ -278,20 +359,40 @@ enum Command {
         connection: String,
     },
     Settle {},
+    Compact {},
     Preconnect {},
-    Thinking {
-        thinking: String,
+    Settings {
+        #[serde(default)]
+        thinking: Option<String>,
+        #[serde(default)]
+        service_tier: Option<ServiceTier>,
         apply: bool,
     },
     Steer {
         request_id: String,
         prompt: String,
+        #[serde(default)]
+        into: Option<String>,
+    },
+    Replace {
+        scope: String,
+        request_id: String,
+        edit_id: String,
+        text: String,
+    },
+    MoveQueued {
+        request_id: String,
+        #[serde(default)]
+        into: Option<String>,
     },
     InterruptSubagent {
         agent_id: u64,
     },
     CloseSubagent {
         agent_id: u64,
+    },
+    CompletionOrigin {
+        request_id: String,
     },
     Dispose {},
     Catalog {
@@ -304,14 +405,51 @@ enum Command {
         requested: Provider,
     },
     Models {},
+    ExportBranch {
+        session_id: String,
+        at: branch::At,
+    },
+    ExportPage {
+        session_id: String,
+        export: BranchExport,
+        cursor: BranchCursor,
+        max_bytes: usize,
+    },
+    ImportBranch {
+        session_id: String,
+        export: BranchExport,
+    },
+    ImportPage {
+        session_id: String,
+        export: BranchExport,
+        page: BranchPage,
+    },
+    PublishBranch {
+        session_id: String,
+        export: BranchExport,
+    },
+    ImportEvents {
+        scope: String,
+        after: u64,
+        events: Vec<LoggedEvent>,
+    },
 }
 
 type Log = SessionLog<store::WorkerStore>;
 
 type Hand = (String, Arc<dyn CodeModeHost>);
 
+#[derive(Clone, Copy, PartialEq)]
+enum Activity {
+    Idle,
+    Driving,
+    Compacting,
+}
+
 struct Session {
+    activity: Cell<Activity>,
     executors: CodeModeExecutors,
+    hand_tools: Option<Arc<remote::ToolSelections>>,
     hands: RefCell<HashMap<String, Hand>>,
     inbox: TurnInbox<store::WorkerStore>,
     model: ModelSelection,
@@ -330,6 +468,7 @@ enum Phase {
 thread_local! {
     static PHASE: RefCell<Phase> = const { RefCell::new(Phase::Empty) };
     static LOGS: RefCell<HashMap<String, Arc<Log>>> = RefCell::new(HashMap::new());
+    static LOGICAL_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
     static VALUE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
@@ -356,8 +495,12 @@ fn log(scope: &str) -> Arc<Log> {
     LOGS.with_borrow_mut(|logs| {
         Arc::clone(logs.entry(scope.to_owned()).or_insert_with(|| {
             let log = SessionLog::new(Arc::new(store::WorkerStore::log()), scope);
-            Arc::new(match VALUE_LIMIT.get() {
+            let log = match VALUE_LIMIT.get() {
                 Some(limit) => log.value_limit(limit),
+                None => log,
+            };
+            Arc::new(match LOGICAL_LIMIT.get() {
+                Some(limit) => log.logical_limit(limit),
                 None => log,
             })
         }))
@@ -388,6 +531,7 @@ fn described(record: &TurnRecord) -> Result<Value, String> {
 fn claude_harness(
     endpoint: Endpoint,
     stream_tool_input: bool,
+    environment: Option<ClaudeEnvironment>,
     instructions: &dyn Fn(Option<&str>) -> String,
 ) -> ClaudeHarness {
     let http = nanocode::claude::transport::HttpClient::new(
@@ -400,7 +544,10 @@ fn claude_harness(
     }
     let max_tokens = endpoint.max_tokens;
     let harness = ClaudeHarness::new(client).configure(move |claude| {
-        let claude = claude.tool_input_deltas(stream_tool_input);
+        let mut claude = claude.tool_input_deltas(stream_tool_input);
+        if let Some(environment) = &environment {
+            claude = claude.environment(environment.clone());
+        }
         Ok(match max_tokens {
             Some(max_tokens) => claude.max_tokens(max_tokens),
             None => claude,
@@ -416,6 +563,7 @@ fn codex_harness(
     endpoint: Endpoint,
     model: Model,
     stream_tool_input: bool,
+    environment: Option<ExecutionEnvironment>,
     instructions: &dyn Fn(Option<&str>) -> String,
 ) -> Result<CodexHarness, Opening> {
     let openai = match (endpoint.subscription, endpoint.gateway) {
@@ -455,14 +603,18 @@ fn codex_harness(
         Some(Gateway::WorkersAi) => openai,
         _ => openai.api_base_url(endpoint.endpoint),
     };
-    let harness = CodexHarness::new(
-        openai
-            .model(model)
-            .tool_input_deltas(stream_tool_input)
-            .host_transport(transport::WorkerTransport::CODEX)
-            .build()
-            .map_err(configuration)?,
-    );
+    let client = openai
+        .model(model)
+        .tool_input_deltas(stream_tool_input)
+        .host_transport(transport::WorkerTransport::CODEX)
+        .build()
+        .map_err(configuration)?;
+    let harness = CodexHarness::new(client).configure(move |codex| {
+        Ok(match &environment {
+            Some(environment) => codex.execution_environment(environment.clone()),
+            None => codex,
+        })
+    });
     Ok(match endpoint.instructions.as_deref() {
         Some(application) => harness.instructions(instructions(Some(application))),
         None => harness,
@@ -480,6 +632,15 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             "code_mode runs cells in this host; leave remote unset",
         ));
     }
+    if let Some(policy) = &config.hand_tools
+        && let Some(backend) = policy
+            .keys()
+            .find(|backend| !matches!(backend.as_str(), "codex" | "claude"))
+    {
+        return Err(configuration(format!(
+            "unsupported hand_tools backend: {backend}"
+        )));
+    }
     let placement = config.remote || config.hands;
     let local = config.code_mode;
     let instructions = |application: Option<&str>| {
@@ -493,9 +654,21 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         .collect::<Vec<_>>()
         .join("\n\n")
     };
+    let environment = config
+        .environment
+        .take()
+        .map(|environment| environment.resolve(config.workspace.as_deref()))
+        .transpose()
+        .map_err(configuration)?;
     let (claude, codex) = config.endpoints().map_err(configuration)?;
-    let claude =
-        claude.map(|endpoint| claude_harness(endpoint, config.stream_tool_input, &instructions));
+    let claude = claude.map(|endpoint| {
+        claude_harness(
+            endpoint,
+            config.stream_tool_input,
+            environment.as_ref().map(Environment::claude),
+            &instructions,
+        )
+    });
     let codex = match codex {
         Some(endpoint) => {
             let default = match config.provider {
@@ -509,12 +682,16 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
                 endpoint,
                 default,
                 config.stream_tool_input,
+                environment.as_ref().map(Environment::codex),
                 &instructions,
             )?)
         }
         None => None,
     };
     let executors = CodeModeExecutors::new();
+    let hand_tools = config
+        .hand_tools
+        .map(|policy| Arc::new(remote::ToolSelections(policy)));
     let mut shared: Vec<Arc<dyn Tool>> = Vec::new();
     if placement {
         shared.push(Arc::new(executors.tool()));
@@ -580,7 +757,12 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .as_deref()
             .unwrap_or(if local { "local" } else { "default" })
             .into();
-        executors.insert(Arc::clone(&name), Arc::new(remote::host(None).await?));
+        let host = remote::host(None).await?;
+        let host = match &hand_tools {
+            Some(policy) => host.with_tool_selection(policy.clone()),
+            None => host,
+        };
+        executors.insert(Arc::clone(&name), Arc::new(host));
         executors.set_default(Some(name));
     }
     let session_instructions = instructions(config.instructions.as_deref());
@@ -590,7 +772,6 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let runtime = builder
         .build()
         .map_err(|error| configuration(format!("build runtime: {error}")))?;
-    let subagents = runtime.subagents().cloned();
     let host = Arc::new(events::WorkerInbox::new(
         config.runtime_id,
         config.started_ms,
@@ -602,6 +783,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             thinking: thinking.unwrap_or_else(|| model.default_thinking()),
             service_tier: config.service_tier.unwrap_or_default(),
         });
+    let subagents = runtime.subagents().cloned();
     match TurnInbox::open(
         (*runtime).clone(),
         &store,
@@ -615,7 +797,9 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         Ok((inbox, pump)) => {
             bridge::spawn(pump);
             Ok(Session {
+                activity: Cell::new(Activity::Idle),
                 executors,
+                hand_tools,
                 hands: RefCell::default(),
                 inbox,
                 model,
@@ -677,7 +861,11 @@ async fn init(config: Value) -> Result<Value, String> {
 
 impl Session {
     async fn attach(&self, hand: String, connection: String) -> Result<Value, String> {
-        let host: Arc<dyn CodeModeHost> = Arc::new(remote::host(Some(connection.clone())).await?);
+        let host = remote::host(Some(connection.clone())).await?;
+        let host: Arc<dyn CodeModeHost> = Arc::new(match &self.hand_tools {
+            Some(policy) => host.with_tool_selection(policy.clone()),
+            None => host,
+        });
         self.executors.insert(hand.as_str(), Arc::clone(&host));
         self.hands.borrow_mut().insert(connection, (hand, host));
         Ok(Value::Null)
@@ -697,7 +885,13 @@ impl Session {
     }
 
     async fn drive(&self, next: Option<&str>) -> Result<Value, String> {
-        Ok(match self.inbox.drive(next).await.map_err(text)? {
+        if self.activity.get() != Activity::Idle {
+            return Ok(json!({"waiting": true, "busy": true}));
+        }
+        self.activity.set(Activity::Driving);
+        let driven = self.inbox.drive(next).await;
+        self.activity.set(Activity::Idle);
+        Ok(match driven.map_err(text)? {
             Driven::Idle => json!({"idle": true}),
             Driven::Busy => json!({"waiting": true, "busy": true}),
             Driven::Finished(record) => json!({"finished": described(&record)?}),
@@ -705,6 +899,28 @@ impl Session {
             Driven::Waiting(request_id) => json!({"waiting": true, "request_id": request_id}),
             Driven::Interrupted(request_id) => json!({"retry": true, "request_id": request_id}),
         })
+    }
+}
+
+impl Session {
+    async fn compact(&self) -> Result<Value, String> {
+        if self.activity.get() != Activity::Idle {
+            return Ok(json!({"busy": true}));
+        }
+        self.activity.set(Activity::Compacting);
+        let compacted = self.compacting().await;
+        self.activity.set(Activity::Idle);
+        compacted
+    }
+
+    async fn compacting(&self) -> Result<Value, String> {
+        let admitted = !self.inbox.log().pending().await.map_err(text)?.is_empty();
+        if admitted || !self.inbox.settle().await.map_err(text)? {
+            return Ok(json!({"busy": true}));
+        }
+        self.inbox.agent().compact().await.map_err(text)?;
+        self.inbox.settle().await.map_err(text)?;
+        Ok(json!({"compacted": true}))
     }
 }
 
@@ -733,6 +949,55 @@ async fn submit(
         }
     };
     Ok(json!({"submitted": status, "turn": described(&record)?}))
+}
+
+async fn append(scope: &str, events: Vec<Annotation>) -> Result<Value, String> {
+    let log = log(scope);
+    let mut entries = Vec::with_capacity(events.len());
+    for Annotation { request_id, event } in events {
+        let described = serde_json::from_str::<Value>(event.get()).map_err(text)?;
+        match described.get("source").and_then(Value::as_str) {
+            Some("agent" | "subagent") => {
+                return Err("sources agent and subagent belong to the SDK's events".into());
+            }
+            Some(_) => {}
+            None => return Err("a host event is an object with a string source".into()),
+        }
+        if let Some(request_id) = &request_id
+            && log.turn(request_id).await.map_err(text)?.is_none()
+        {
+            return Err(format!("turn {request_id} is not in the log"));
+        }
+        entries.push(LogEntry { request_id, event });
+    }
+    let logged = log.append(&entries).await.map_err(text)?;
+    events::publish(logged.clone()).await?;
+    Ok(json!({"appended": logged}))
+}
+
+async fn replace(
+    scope: &str,
+    request_id: &str,
+    edit_id: &str,
+    edited: &str,
+) -> Result<Value, String> {
+    let status = match log(scope)
+        .replace_queued(request_id, edit_id, edited)
+        .await
+        .map_err(text)?
+    {
+        Replaced::Applied(Some(event)) => {
+            events::publish(vec![event]).await?;
+            "applied"
+        }
+        Replaced::Applied(None) => "already_applied",
+        Replaced::NotQueued => "not_queued",
+        Replaced::Conflict => "conflict",
+        Replaced::TooLarge { bytes, limit } => {
+            return Ok(json!({"replaced": "too_large", "bytes": bytes, "limit": limit}));
+        }
+    };
+    Ok(json!({"replaced": status}))
 }
 
 async fn cancel(
@@ -850,7 +1115,11 @@ fn raw(value: &impl Serialize) -> Result<Box<RawValue>, String> {
 type Executed = Pin<Box<dyn Future<Output = Result<Box<RawValue>, String>>>>;
 
 fn models() -> Value {
-    let entry = |id: &str, model: ModelSelection, gateways: Vec<&str>| {
+    let entry = |id: &str,
+                 model: ModelSelection,
+                 gateways: Vec<&str>,
+                 context_window_tokens: u64,
+                 auto_compact_limit: Option<u64>| {
         let capabilities = model.capabilities(ModelTransport::Native);
         json!({
             "id": id,
@@ -858,12 +1127,25 @@ fn models() -> Value {
             "efforts": capabilities.thinking().map(Thinking::as_str).collect::<Vec<_>>(),
             "effort": capabilities.default_thinking().as_str(),
             "priority": capabilities.supports_service_tier(ServiceTier::Priority),
+            "service_tiers": capabilities.service_tiers().map(ServiceTier::as_str).collect::<Vec<_>>(),
+            "reasoning_modes": capabilities.reasoning_modes().map(ReasoningMode::as_str).collect::<Vec<_>>(),
             "gateways": gateways,
+            "context_window_tokens": context_window_tokens,
+            "auto_compact_token_limit": auto_compact_limit,
         })
     };
     let claude = HarnessFamily::Claude
         .models()
-        .map(|model| entry(model.as_str(), model.clone(), vec!["direct", "vercel"]))
+        .map(|model| {
+            let window = nanocode::claude::default_context_window_tokens(model.as_str());
+            entry(
+                model.as_str(),
+                model.clone(),
+                vec!["direct", "vercel"],
+                window,
+                None,
+            )
+        })
         .collect::<Vec<_>>();
     let vercel = ResponsesGateway::vercel();
     let workers_ai = ChatGateway::workers_ai("catalog");
@@ -883,7 +1165,14 @@ fn models() -> Value {
                 Model::Glm53 => "glm-5.3",
                 _ => model.as_str(),
             };
-            entry(id, ModelSelection::Codex(model), gateways)
+            let window = CONTEXT_WINDOW_TOKENS.min(model.max_context_window_tokens());
+            entry(
+                id,
+                ModelSelection::Codex(model),
+                gateways,
+                window,
+                auto_compact_token_limit(model.as_str(), window),
+            )
         })
         .collect::<Vec<_>>();
     json!({"harnesses": [
@@ -898,8 +1187,12 @@ fn executed<T: Serialize>(future: impl Future<Output = Result<T, String>> + 'sta
 
 fn execute(command: Command) -> Executed {
     match command {
-        Command::Configure { value_limit } => executed(async move {
+        Command::Configure {
+            value_limit,
+            logical_limit,
+        } => executed(async move {
             VALUE_LIMIT.set(value_limit);
+            LOGICAL_LIMIT.set(logical_limit);
             Ok(Value::Null)
         }),
         Command::Init { config } => executed(init(config)),
@@ -910,6 +1203,7 @@ fn execute(command: Command) -> Executed {
             hand,
             metadata,
         } => executed(async move { submit(&scope, request_id, prompt, hand, &metadata).await }),
+        Command::Append { scope, events } => executed(async move { append(&scope, events).await }),
         Command::Turn { scope, request_id } => executed(async move {
             let record = log(&scope).turn(&request_id).await.map_err(text)?;
             Ok(json!({"turn": record.as_ref().map(described).transpose()?}))
@@ -952,11 +1246,17 @@ fn execute(command: Command) -> Executed {
             after,
             limit,
             request_id,
+            max_bytes,
         } => executed(async move {
             let log = log(&scope);
-            match request_id {
-                Some(request_id) => log.turn_page(&request_id, after, limit).await,
-                None => log.page(after, limit).await,
+            match (request_id, max_bytes) {
+                (Some(request_id), Some(bytes)) => {
+                    log.turn_page_bounded(&request_id, after, limit, bytes)
+                        .await
+                }
+                (Some(request_id), None) => log.turn_page(&request_id, after, limit).await,
+                (None, Some(bytes)) => log.page_bounded(after, limit, bytes).await,
+                (None, None) => log.page(after, limit).await,
             }
             .map_err(text)
         }),
@@ -972,33 +1272,50 @@ fn execute(command: Command) -> Executed {
             })
         }),
         Command::Settle {} => executed(async move { ready()?.inbox.settle().await.map_err(text) }),
+        Command::Compact {} => executed(async move { ready()?.compact().await }),
         Command::Models {} => executed(async move { Ok(models()) }),
         Command::Preconnect {} => executed(async move {
             ready()?.inbox.agent().preconnect().await.map_err(text)?;
             Ok(Value::Null)
         }),
-        Command::Thinking { thinking, apply } => executed(async move {
-            let thinking = thinking.parse::<Thinking>().map_err(text)?;
-            let session = ready()?;
-            session
-                .model
-                .capabilities(ModelTransport::Native)
-                .check_thinking(thinking)
+        Command::Settings {
+            thinking,
+            service_tier,
+            apply,
+        } => executed(async move {
+            let thinking = thinking
+                .map(|thinking| thinking.parse::<Thinking>())
+                .transpose()
                 .map_err(text)?;
-            if apply {
-                session
-                    .inbox
-                    .agent()
-                    .set_thinking(thinking)
-                    .await
+            let session = ready()?;
+            let capabilities = session.model.capabilities(ModelTransport::Native);
+            if let Some(thinking) = thinking {
+                capabilities.check_thinking(thinking).map_err(text)?;
+            }
+            if let Some(service_tier) = service_tier {
+                capabilities
+                    .check_service_tier(service_tier)
                     .map_err(text)?;
+            }
+            if apply {
+                let agent = session.inbox.agent();
+                if let Some(thinking) = thinking {
+                    agent.set_thinking(thinking).await.map_err(text)?;
+                }
+                if let Some(service_tier) = service_tier {
+                    agent.set_service_tier(service_tier).await.map_err(text)?;
+                }
             }
             Ok(Value::Null)
         }),
-        Command::Steer { request_id, prompt } => executed(async move {
+        Command::Steer {
+            request_id,
+            prompt,
+            into,
+        } => executed(async move {
             let steered = ready()?
                 .inbox
-                .steer(&request_id, Prompt::from(prompt))
+                .steer(into.as_deref(), &request_id, Prompt::from(prompt))
                 .await
                 .map_err(text)?;
             Ok(Value::Bool(steered))
@@ -1018,6 +1335,33 @@ fn execute(command: Command) -> Executed {
                 .close(session.inbox.session_id(), AgentId::new(agent_id))
                 .await
                 .map_err(text)
+        }),
+        Command::CompletionOrigin { request_id } => executed(async move {
+            let origin = match &ready()?.subagents {
+                Some(subagents) => subagents.completion_origin(&request_id).await,
+                None => None,
+            };
+            Ok(json!(origin.as_deref()))
+        }),
+        Command::Replace {
+            scope,
+            request_id,
+            edit_id,
+            text: edited,
+        } => executed(async move { replace(&scope, &request_id, &edit_id, &edited).await }),
+        Command::MoveQueued { request_id, into } => executed(async move {
+            let moved = ready()?
+                .inbox
+                .move_queued(&request_id, into.as_deref())
+                .await
+                .map_err(text)?;
+            Ok(json!({"moved": match moved {
+                MovedQueued::Moved => "moved",
+                MovedQueued::NotQueued => "not_queued",
+                MovedQueued::NotRunning => "not_running",
+                MovedQueued::Conflict => "conflict",
+                MovedQueued::Unknown => "unknown",
+            }}))
         }),
         Command::Dispose {} => executed(dispose()),
         Command::Catalog {
@@ -1044,6 +1388,41 @@ fn execute(command: Command) -> Executed {
                     }
                 },
             )
+        }),
+        Command::ExportBranch { session_id, at } => {
+            executed(async move { branch::export(&session_id, at).await })
+        }
+        Command::ExportPage {
+            session_id,
+            export,
+            cursor,
+            max_bytes,
+        } => executed(async move { branch::page(&session_id, &export, cursor, max_bytes).await }),
+        Command::ImportBranch { session_id, export } => executed(async move {
+            let next = branch::import(&session_id, export, None).await?;
+            Ok(json!({"next": next}))
+        }),
+        Command::ImportPage {
+            session_id,
+            export,
+            page,
+        } => executed(async move {
+            let next = branch::import(&session_id, export, Some(&page)).await?;
+            Ok(json!({"next": next}))
+        }),
+        Command::PublishBranch { session_id, export } => {
+            executed(async move { branch::publish(&session_id, &export).await })
+        }
+        Command::ImportEvents {
+            scope,
+            after,
+            events,
+        } => executed(async move {
+            log(&scope)
+                .import_events(after, &events)
+                .await
+                .map(Value::from)
+                .map_err(text)
         }),
     }
 }

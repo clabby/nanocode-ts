@@ -1,10 +1,10 @@
-use std::{cell::RefCell, time::Duration};
+use std::{cell::RefCell, collections::HashMap, time::Duration};
 
 use nanocode_code_mode::{
     embedded::{CodeModeHostError, HostFuture},
     remote::{
-        RemoteActivity, RemoteCatalog, RemoteClient, RemoteCodeModeHost, RemoteDelivery,
-        RemoteFrame as Frame, RemoteLink,
+        HandToolSelection, RemoteActivity, RemoteCatalog, RemoteClient, RemoteCodeModeHost,
+        RemoteDelivery, RemoteFrame as Frame, RemoteLink, RemoteOperation,
     },
 };
 use serde_json::{Value, json};
@@ -38,12 +38,51 @@ pub fn busy() -> bool {
     ACTIVITY.with_borrow(|activity| activity.iter().any(RemoteActivity::busy))
 }
 
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSelection {
+    include: Option<Vec<String>>,
+    #[serde(default)]
+    exclude: Vec<String>,
+}
+
+pub struct ToolSelections(pub HashMap<String, ToolSelection>);
+
+impl HandToolSelection for ToolSelections {
+    fn allows(&self, _session_id: &str, backend: &str, name: &str) -> bool {
+        self.0.get(backend).is_none_or(|selection| {
+            selection
+                .include
+                .as_ref()
+                .is_none_or(|names| names.iter().any(|allowed| allowed == name))
+                && !selection.exclude.iter().any(|excluded| excluded == name)
+        })
+    }
+}
+
+fn origin(frame: &Frame) -> Option<&str> {
+    match frame {
+        Frame::Request {
+            operation:
+                RemoteOperation::Execute { context, .. }
+                | RemoteOperation::Wait { context, .. }
+                | RemoteOperation::Call { context, .. },
+            ..
+        } => context.host_context.as_deref(),
+        _ => None,
+    }
+}
+
 struct WorkerLink {
     connection: Option<String>,
+    tool_selection: bool,
     max_frame_bytes: usize,
 }
 
 impl RemoteLink for WorkerLink {
+    fn supports_tool_selection(&self) -> bool {
+        self.tool_selection
+    }
     fn send(
         &self,
         frames: Vec<Frame>,
@@ -51,15 +90,45 @@ impl RemoteLink for WorkerLink {
     ) -> HostFuture<'_, Result<(), CodeModeHostError>> {
         Box::pin(async move {
             let dispatches = frames.iter().any(Frame::dispatches);
-            let frames = frames
+            let origins: Vec<Value> = frames
+                .iter()
+                .enumerate()
+                .filter(|(_, frame)| frame.dispatches())
+                .map(|(index, frame)| json!({"index": index, "origin": origin(frame)}))
+                .collect();
+            let encoded = frames
                 .iter()
                 .map(|frame| frame.encode(self.max_frame_bytes))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|issue| CodeModeHostError::unsent(issue.message()))?;
-            call(json!({"op": "remote_send", "connection": self.connection, "frames": frames, "durable": delivery == RemoteDelivery::Durable, "dispatches": dispatches}))
+            let sent = call(json!({"op": "remote_send", "connection": self.connection, "frames": encoded, "durable": delivery == RemoteDelivery::Durable, "dispatches": dispatches, "origins": origins}))
                 .await
-                .map(drop)
-                .map_err(send_error)
+                .map_err(send_error)?;
+            let Some(refused) = sent
+                .get("refused")
+                .and_then(Value::as_array)
+                .filter(|refused| !refused.is_empty())
+            else {
+                return Ok(());
+            };
+            let ids = refused
+                .iter()
+                .map(|index| {
+                    match index
+                        .as_u64()
+                        .and_then(|index| frames.get(usize::try_from(index).ok()?))
+                    {
+                        Some(Frame::Request { id, .. }) => Ok(*id),
+                        _ => Err(error(format!(
+                            "the host refused {index}, which is not a request frame of the batch"
+                        ))),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let reason = sent["reason"]
+                .as_str()
+                .ok_or_else(|| error("the host refused requests without a reason"))?;
+            Err(CodeModeHostError::refused(reason, ids))
         })
     }
 
@@ -128,6 +197,7 @@ pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, Stri
     let (client, driver) = RemoteClient::new(
         WorkerLink {
             connection,
+            tool_selection: catalog.tool_selection,
             max_frame_bytes: catalog
                 .max_frame_bytes
                 .map_or(max_frame_bytes, |peer| peer.min(max_frame_bytes)),

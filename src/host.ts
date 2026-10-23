@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type SubagentSummary, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Compacted, type Driven, type HostEvent, type HostOptions, type LoggedEvent, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type SubagentSummary, type Thinking, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 import { LocalHand } from "./hand.ts";
 
@@ -95,7 +95,9 @@ export class AgentRuntime {
     const instance = await WebAssembly.instantiate(module, { host: runtime.imports() });
     runtime.timings.record("wasm.instantiate", performance.now() - instantiateStarted);
     runtime.wasm = instance.exports as unknown as Exports;
-    if (sql.value_limit !== undefined) await runtime.command("configure", { value_limit: sql.value_limit });
+    if (sql.value_limit !== undefined || options.log_logical_limit !== undefined) {
+      await runtime.command("configure", { value_limit: sql.value_limit, logical_limit: options.log_logical_limit });
+    }
     return runtime;
   }
 
@@ -144,6 +146,10 @@ export class AgentRuntime {
     return await this.command("submit", { scope, ...input }) as Submitted;
   }
 
+  async append(scope: string, events: { request_id?: string; event: HostEvent }[]): Promise<LoggedEvent[]> {
+    return (await this.command("append", { scope, events }) as { appended: LoggedEvent[] }).appended;
+  }
+
   async admit(request_id: string, recorded: string | null, requested: string): Promise<"reserved_request_id" | "provider_changed" | undefined> {
     return (await this.command("admit", { request_id, recorded, requested }) as { rejected?: "reserved_request_id" | "provider_changed" } | null)?.rejected;
   }
@@ -164,8 +170,9 @@ export class AgentRuntime {
     return (await this.command("pending", { scope }) as { turns: TurnView[] }).turns;
   }
 
-  async page(scope: string, after: number, limit: number, request_id?: string): Promise<LogPage> {
-    return await this.command("page", { scope, after, limit, request_id }) as LogPage;
+  async page(scope: string, after: number, limit: number, options?: string | LogPageOptions): Promise<LogPage> {
+    const page = typeof options === "string" ? { request_id: options } : options;
+    return await this.command("page", { scope, after, limit, ...page }) as LogPage;
   }
 
   async interrupted(scope: string, request_id: string, note: string): Promise<void> {
@@ -182,6 +189,30 @@ export class AgentRuntime {
 
   async import(scope: string, turns: unknown[]): Promise<number> {
     return await this.command("import", { scope, turns }) as number;
+  }
+
+  async exportBranch(session_id: string, at: BranchPoint): Promise<BranchExport> {
+    return await this.command("export_branch", { session_id, at }) as BranchExport;
+  }
+
+  async exportPage(session_id: string, exported: BranchExport, cursor: BranchCursor, max_bytes: number): Promise<BranchPage> {
+    return await this.command("export_page", { session_id, export: exported, cursor, max_bytes }) as BranchPage;
+  }
+
+  async importBranch(session_id: string, exported: BranchExport): Promise<BranchCursor | null> {
+    return (await this.command("import_branch", { session_id, export: exported }) as { next: BranchCursor | null }).next;
+  }
+
+  async importPage(session_id: string, exported: BranchExport, page: BranchPage): Promise<BranchCursor | null> {
+    return (await this.command("import_page", { session_id, export: exported, page }) as { next: BranchCursor | null }).next;
+  }
+
+  async publishBranch(session_id: string, exported: BranchExport): Promise<BranchSummary> {
+    return await this.command("publish_branch", { session_id, export: exported }) as BranchSummary;
+  }
+
+  async importEvents(scope: string, after: number, events: LoggedEvent[]): Promise<number> {
+    return await this.command("import_events", { scope, after, events }) as number;
   }
 
   async cancel(scope: string, request_id: string, fields: Record<string, unknown>): Promise<{ turn: TurnView | null; dequeued?: boolean }> {
@@ -234,8 +265,20 @@ export class AgentRuntime {
     return await this.command("settle", {}) === true;
   }
 
-  async steer(requestId: string, prompt: string): Promise<boolean> {
-    return await this.command("steer", { request_id: requestId, prompt }) === true;
+  async compact(): Promise<Compacted> {
+    return await this.command("compact", {}) as Compacted;
+  }
+
+  async steer(requestId: string, prompt: string, into?: string): Promise<boolean> {
+    return await this.command("steer", { request_id: requestId, prompt, into }) === true;
+  }
+
+  async replaceQueued(scope: string, request_id: string, edit_id: string, text: string): Promise<Replaced> {
+    return await this.command("replace", { scope, request_id, edit_id, text }) as Replaced;
+  }
+
+  async moveQueued(requestId: string, into?: string): Promise<MovedQueued> {
+    return (await this.command("move_queued", { request_id: requestId, into }) as { moved: MovedQueued }).moved;
   }
 
   async interruptSubagent(agent_id: number): Promise<SubagentSummary[]> {
@@ -246,12 +289,20 @@ export class AgentRuntime {
     return await this.command("close_subagent", { agent_id }) as SubagentSummary[];
   }
 
-  async checkThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void> {
-    await this.command("thinking", { thinking, apply: false });
+  async completionOrigin(requestId: string): Promise<string | null> {
+    return await this.command("completion_origin", { request_id: requestId }) as string | null;
   }
 
-  async setThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void> {
-    await this.command("thinking", { thinking, apply: true });
+  async checkThinking(thinking: Thinking): Promise<void> {
+    await this.command("settings", { thinking, apply: false });
+  }
+
+  async setThinking(thinking: Thinking): Promise<void> {
+    await this.settings({ thinking });
+  }
+
+  async settings(settings: RuntimeSettings): Promise<void> {
+    await this.command("settings", { ...settings, apply: true });
   }
 
   async preconnect(): Promise<void> {
@@ -318,6 +369,14 @@ export class AgentRuntime {
         cancel();
       },
       clock: (monotonic: number) => monotonic ? performance.now() : Date.now(),
+      calendar_date: (pointer: number, length: number) => {
+        try {
+          const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: this.read(pointer, length), year: "numeric", month: "numeric", day: "numeric" }).formatToParts(Date.now()).map(part => [part.type, Number(part.value)]));
+          return parts.year * 10_000 + parts.month * 100 + parts.day;
+        } catch {
+          return 0;
+        }
+      },
       random: (pointer: number, length: number) => { crypto.getRandomValues(new Uint8Array(this.wasm.memory.buffer, pointer, length)); },
       reply: (id: number, pointer: number, length: number) => {
         const reply = JSON.parse(this.read(pointer, length));
@@ -366,7 +425,7 @@ export class AgentRuntime {
         this.models.push(timing);
         if (this.models.length > RECENT_MODEL_LIMIT) this.models.shift();
         let response: Response;
-        try { response = await this.options.dispatch({ provider: request.provider, endpoint: request.endpoint, method: request.method ?? "POST", headers: request.headers, body: request.body }, controller.signal, timing); }
+        try { response = await this.options.dispatch({ provider: request.provider, endpoint: request.endpoint, method: request.method ?? "POST", headers: request.headers, body: request.body, origin: request.origin ?? null }, controller.signal, timing); }
         catch (error) { this.finishModel(timing, controller.signal.aborted ? "cancelled" : "failed"); throw error; }
         timing.headers_ms = this.elapsed() - timing.started_ms;
         timing.status = response.status;
@@ -451,7 +510,7 @@ export class AgentRuntime {
         this.models.push(timing);
         if (this.models.length > RECENT_MODEL_LIMIT) this.models.shift();
         let handshake;
-        try { handshake = await this.options.socket.open({ provider: request.provider, headers: request.headers }, controller.signal, timing); }
+        try { handshake = await this.options.socket.open({ provider: request.provider, headers: request.headers, origin: request.origin ?? null }, controller.signal, timing); }
         catch (error) { this.finishModel(timing, controller.signal.aborted ? "cancelled" : "failed"); throw error; }
         timing.headers_ms = this.elapsed() - timing.started_ms;
         timing.status = handshake.status;
@@ -482,7 +541,7 @@ export class AgentRuntime {
         const entry = this.sockets.get(request.id);
         if (entry?.closed !== undefined) return { closed: entry.closed };
         if (!entry) return { closed: "after the client released it" };
-        await this.options.socket!.admit();
+        await this.options.socket!.admit(request.origin ?? null);
         if (entry.closed !== undefined) return { closed: entry.closed };
         try { entry.socket.send(this.decoder.decode(request.body)); }
         catch { this.closeSocket(request.id, "before request dispatch", "failed"); return { closed: entry.closed }; }

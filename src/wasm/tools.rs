@@ -31,6 +31,7 @@ impl FunctionHandler for Bridge {
             "turn_id": context.turn_id(),
             "model": context.model(),
             "instruction_revision": context.instruction_revision(),
+            "origin": context.host_context(),
         });
         Box::pin(async move {
             call(json!({"op": "tool_call", "name": name, "input": input, "context": context}))

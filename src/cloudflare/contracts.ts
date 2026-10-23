@@ -1,6 +1,6 @@
-import type { AgentConfiguration, ModelProvider, ToolCallContext } from "../index.ts";
+import type { ModelProvider, Thinking, ToolCallContext } from "../index.ts";
 
-export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
+export type { Thinking };
 
 export const THINKING: readonly Thinking[] = ["none", "low", "medium", "high", "xhigh", "max"];
 

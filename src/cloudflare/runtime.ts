@@ -47,6 +47,7 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
   codeMode?: false | { fetch?(authority: SessionAuthority, env: E): typeof fetch };
   instructions?: string;
   workspace?: false | { cwd?: string; files?: Record<string, string> };
+  valueLimit?: number;
 };
 
 type TurnTiming = { started: number; admitted_at?: number; admission_ms?: number; pump_wait_ms?: number; runtime_open_ms?: number; runtime_reused?: boolean; run_started?: number; run_ms?: number; recovered?: boolean; checkpoints: TimingSnapshot; runtime?: TimingSnapshot };
@@ -65,12 +66,11 @@ function duration(value: string, name: string): number {
 }
 
 const handName = (value: unknown): value is string => typeof value === "string" && EXECUTOR_ID.test(value);
-const TOO_LARGE = `request bodies are limited to ${SQLITE_VALUE_LIMIT_BYTES} bytes`;
 const decoder = new TextDecoder();
 const cells = quickjs({ wasm: quickjsWasm });
 const offline: typeof fetch = async () => { throw new Error("this host gives Code Mode scripts no network access"); };
 
-async function bodyText(request: Request): Promise<string | undefined> {
+async function bodyText(request: Request, limit: number): Promise<string | undefined> {
   if (!request.body) return "";
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -79,7 +79,7 @@ async function bodyText(request: Request): Promise<string | undefined> {
     const { done, value } = await reader.read();
     if (done) break;
     total += value.byteLength;
-    if (total > SQLITE_VALUE_LIMIT_BYTES) {
+    if (total > limit) {
       await reader.cancel().catch(() => {});
       return undefined;
     }
@@ -116,6 +116,8 @@ export type Nanocode<E extends NanocodeEnv> = {
 };
 
 export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E>): Nanocode<E> {
+  const valueLimit = options.valueLimit ?? SQLITE_VALUE_LIMIT_BYTES;
+  const tooLarge = `request bodies are limited to ${valueLimit} bytes`;
   class AgentSession extends DurableObject<E> {
     private readonly store: CheckpointStore;
     private readonly metadata: Metadata;
@@ -150,7 +152,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
     constructor(ctx: DurableObjectState, env: E) {
       super(ctx, env);
-      this.store = new CheckpointStore(ctx.storage);
+      this.store = new CheckpointStore(ctx.storage, valueLimit);
       this.metadata = new Metadata(ctx.storage);
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -256,8 +258,8 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           return turn ? json(turn.report) : json({ error: "request not found" }, 404);
         }
         if (request.method !== "POST" || parts.length !== 3) return json({ error: "method not allowed" }, 405);
-        const body = await bodyText(request);
-        if (body === undefined) return json({ error: TOO_LARGE }, 413);
+        const body = await bodyText(request, valueLimit);
+        if (body === undefined) return json({ error: tooLarge }, 413);
         let input: any;
         try { input = JSON.parse(body); } catch { return json({ error: "invalid JSON" }, 400); }
         if (typeof input?.request_id !== "string" || !input.request_id.trim() || typeof input.prompt !== "string" || !input.prompt.trim()) return json({ error: "request_id and prompt must be nonempty strings" }, 400);
@@ -1089,7 +1091,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       if (this.deleted) return Promise.reject(new Error("session deleted"));
       let current = this.instances.get(scope);
       if (!current) {
-        current = AgentRuntime.instantiate(wasm, this.store, { published: (events, bytes) => this.published(scope, events, bytes), wake: () => this.eventHub.notify() });
+        current = AgentRuntime.instantiate(wasm, this.store, { log_logical_limit: valueLimit, published: (events, bytes) => this.published(scope, events, bytes), wake: () => this.eventHub.notify() });
         const created = current;
         this.instances.set(scope, created);
         void created.catch(() => { if (this.instances.get(scope) === created) this.instances.delete(scope); });
@@ -1114,7 +1116,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         if (descriptor && !await this.allowed(descriptor)) throw new Error("access token expired or revoked");
         return this.eventHub.recent(cursor, requestId) ?? await (await this.instance(scope)).page(scope, cursor, limit, requestId);
       };
-      if (streaming) return this.eventHub.stream(after, policy(this.env.EVENT_STREAM_KEEPALIVE_MS, "EVENT_STREAM_KEEPALIVE_MS"), read, requestId === undefined ? undefined : event => (event.event as { type?: unknown } | undefined)?.type === "result");
+      if (streaming) return this.eventHub.stream(after, policy(this.env.EVENT_STREAM_KEEPALIVE_MS, "EVENT_STREAM_KEEPALIVE_MS"), read, requestId === undefined ? undefined : event => { const body = event.event as { source?: unknown; type?: unknown } | undefined; return body?.source === undefined && body?.type === "result"; });
       return json(await (await this.instance(scope)).page(scope, after, limit));
     }
 
@@ -1140,7 +1142,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     let name: string;
     try { name = decodeURIComponent(match[1]); } catch { return json({ error: "invalid session encoding" }, 400); }
     if (!name || name.includes("\0")) return json({ error: "invalid session name" }, 400);
-    if (Number(request.headers.get("content-length") ?? 0) > SQLITE_VALUE_LIMIT_BYTES) return json({ error: TOO_LARGE }, 413);
+    if (Number(request.headers.get("content-length") ?? 0) > valueLimit) return json({ error: tooLarge }, 413);
     const mode = (provider: ModelProvider) => options.subscription ? options.subscription(account, env, provider) : env.MODEL_AUTH === "subscription";
     const [subscription, codex_subscription] = await Promise.all([mode("claude"), mode("codex")]);
     const caller = typeof principal === "object" ? principal : undefined;
