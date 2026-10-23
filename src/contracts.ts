@@ -116,6 +116,8 @@ export type LoggedEvent = { seq: number; request_id: string | null; created_at: 
 
 export type LogPage = { events: LoggedEvent[]; next_cursor: number; has_more: boolean };
 
+export type HostEvent = { source: string; [field: string]: unknown };
+
 export type Driven = { idle?: boolean; busy?: boolean; waiting?: boolean; retry?: boolean; request_id?: string; resumed?: string; finished?: TurnView };
 
 export const RECENT_MODEL_LIMIT = 64;

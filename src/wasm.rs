@@ -28,8 +28,8 @@ use nanocode::{
     },
     durability::{InitialSettings, SessionRecord, SqlStore},
     session_host::{
-        Driven, ImportedTurn, InboxError, SessionLog, Submission, Submitted, TurnInbox, TurnRecord,
-        TurnState,
+        Driven, ImportedTurn, InboxError, LogEntry, SessionLog, Submission, Submitted, TurnInbox,
+        TurnRecord, TurnState,
     },
     tool_contract::{Tool, ToolCollection},
 };
@@ -206,6 +206,13 @@ struct Legacy {
 }
 
 #[derive(Deserialize)]
+struct Annotation {
+    #[serde(default)]
+    request_id: Option<String>,
+    event: Box<RawValue>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Command {
     Configure {
@@ -222,6 +229,10 @@ enum Command {
         #[serde(default)]
         hand: Option<String>,
         metadata: Value,
+    },
+    Append {
+        scope: String,
+        events: Vec<Annotation>,
     },
     Turn {
         scope: String,
@@ -738,6 +749,30 @@ async fn submit(
     Ok(json!({"submitted": status, "turn": described(&record)?}))
 }
 
+async fn append(scope: &str, events: Vec<Annotation>) -> Result<Value, String> {
+    let log = log(scope);
+    let mut entries = Vec::with_capacity(events.len());
+    for Annotation { request_id, event } in events {
+        let described = serde_json::from_str::<Value>(event.get()).map_err(text)?;
+        match described.get("source").and_then(Value::as_str) {
+            Some("agent" | "subagent") => {
+                return Err("sources agent and subagent belong to the SDK's events".into());
+            }
+            Some(_) => {}
+            None => return Err("a host event is an object with a string source".into()),
+        }
+        if let Some(request_id) = &request_id
+            && log.turn(request_id).await.map_err(text)?.is_none()
+        {
+            return Err(format!("turn {request_id} is not in the log"));
+        }
+        entries.push(LogEntry { request_id, event });
+    }
+    let logged = log.append(&entries).await.map_err(text)?;
+    events::publish(logged.clone()).await?;
+    Ok(json!({"appended": logged}))
+}
+
 async fn cancel(
     scope: &str,
     request_id: &str,
@@ -915,6 +950,7 @@ fn execute(command: Command) -> Executed {
             hand,
             metadata,
         } => executed(async move { submit(&scope, request_id, prompt, hand, &metadata).await }),
+        Command::Append { scope, events } => executed(async move { append(&scope, events).await }),
         Command::Turn { scope, request_id } => executed(async move {
             let record = log(&scope).turn(&request_id).await.map_err(text)?;
             Ok(json!({"turn": record.as_ref().map(described).transpose()?}))
