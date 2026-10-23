@@ -107,13 +107,14 @@ export class RemoteExecutor<S extends MessageSocket = MessageSocket> {
         return { frame: this.#catalog, max_frame_bytes: this.#policy.max_frame_bytes, timeout_ms: this.#policy.timeout_ms };
       case "remote_send": {
         if (this.#failure !== undefined) throw new RemoteRefusal(this.#failure);
+        const refused = new Set(request.refused);
         let sent = 0;
         try {
-          for (const frame of request.frames ?? []) { this.#socket.send(frame); sent++; }
+          for (const [index, frame] of (request.frames ?? []).entries()) if (!refused.has(index)) { this.#socket.send(frame); sent++; }
         } catch (error) {
           throw sent ? error : new RemoteRefusal(error instanceof Error ? error.message : String(error));
         }
-        return null;
+        return refused.size ? { refused: [...refused], reason: request.reason } : null;
       }
       case "remote_poll":
         if (this.#frames.length) return { frames: this.#frames.splice(0) };

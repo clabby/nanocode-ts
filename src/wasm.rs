@@ -310,6 +310,9 @@ enum Command {
     CloseSubagent {
         agent_id: u64,
     },
+    CompletionOrigin {
+        request_id: String,
+    },
     Dispose {},
     Catalog {
         frame: String,
@@ -1135,6 +1138,13 @@ fn execute(command: Command) -> Executed {
                 .close(session.inbox.session_id(), AgentId::new(agent_id))
                 .await
                 .map_err(text)
+        }),
+        Command::CompletionOrigin { request_id } => executed(async move {
+            let origin = match &ready()?.subagents {
+                Some(subagents) => subagents.completion_origin(&request_id).await,
+                None => None,
+            };
+            Ok(json!(origin.as_deref()))
         }),
         Command::Dispose {} => executed(dispose()),
         Command::Catalog {
