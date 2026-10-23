@@ -1,6 +1,6 @@
 import { type DriveContext, EffectFailure, Fatal, type Harness, type HostTool, hostToolIO, Restart, type SessionState, type Submission } from "durable-harness";
 import { liveEvent } from "../client.ts";
-import { AgentRuntime, type AgentConfiguration, HostFailure, LocalHand, type LoggedEvent, type ModelProvider, sessionUuid } from "../index.ts";
+import { AgentRuntime, type AgentConfiguration, HostFailure, LocalHand, type LoggedEvent, type ModelProvider, type ServiceTier, sessionUuid, type Thinking } from "../index.ts";
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
 import { nanocodeModule, quickjsModule } from "./module.ts";
@@ -15,9 +15,7 @@ export const WAIT_POLL_MS = 250;
 
 export const DEFAULT_EVENT_COALESCE_MS = 50;
 
-export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
-
-export type ServiceTier = NonNullable<AgentConfiguration["service_tier"]>;
+export type { ServiceTier, Thinking };
 
 export type NanocodeSession = { session_id: string; provider: ModelProvider; model?: string; thinking?: Thinking; max_tokens?: number; service_tier?: ServiceTier };
 

@@ -15,11 +15,19 @@ export function sessionUuid(): string {
 
 export type HostTool = { name: string; description: string; parameters: Record<string, unknown>; content?: boolean };
 
+export type Thinking = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export type ServiceTier = "standard" | "priority" | "fast" | "ultrafast";
+
+export type ReasoningMode = "standard" | "pro";
+
+export type RuntimeSettings = { thinking?: Thinking; service_tier?: ServiceTier };
+
 export type AgentConfiguration = {
   scope: string;
   provider?: ModelProvider;
   model?: string;
-  thinking?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
+  thinking?: Thinking;
   instructions?: string;
   session_id: string;
   subscription: boolean;
@@ -27,7 +35,7 @@ export type AgentConfiguration = {
   gateway?: "vercel" | "workers_ai";
   cloudflare_account_id?: string;
   max_tokens?: number;
-  service_tier?: "standard" | "priority" | "fast";
+  service_tier?: ServiceTier;
   subagents?: boolean;
   remote?: boolean;
   executor?: string;
@@ -42,11 +50,9 @@ export type AgentConfiguration = {
 
 export type McpServer = { name: string; url: string; headers?: Record<string, string>; bearer_token?: string };
 
-export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
-
 export type ModelGateway = "direct" | "vercel" | "workers_ai";
 
-export type ModelEntry = { id: string; name: string; efforts: Thinking[]; effort: Thinking; priority: boolean; gateways: ModelGateway[] };
+export type ModelEntry = { id: string; name: string; efforts: Thinking[]; effort: Thinking; priority: boolean; service_tiers: ServiceTier[]; reasoning_modes: ReasoningMode[]; gateways: ModelGateway[] };
 
 export type ModelCatalog = { harnesses: { id: ModelProvider; models: ModelEntry[] }[] };
 
